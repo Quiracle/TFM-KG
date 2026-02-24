@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import psycopg
+
+from src.tfmkg.adapters.db.psycopg_client import normalize_psycopg_dsn
+from src.tfmkg.domain.ports.vector_store import VectorStorePort
+
+
+def _to_vector_literal(embedding: list[float]) -> str:
+    return "[" + ",".join(str(value) for value in embedding) + "]"
+
+
+class PgVectorRepository(VectorStorePort):
+    def __init__(self, database_url: str):
+        self._dsn = normalize_psycopg_dsn(database_url)
+
+    def upsert_chunks(self, chunks: list[dict[str, Any]]) -> None:
+        if not chunks:
+            return
+
+        query = """
+            INSERT INTO chunks (
+                chunk_id,
+                source_type,
+                source_ref,
+                dataset_version,
+                text,
+                metadata,
+                embedding
+            ) VALUES (
+                %(chunk_id)s,
+                %(source_type)s,
+                %(source_ref)s,
+                %(dataset_version)s,
+                %(text)s,
+                %(metadata)s::jsonb,
+                %(embedding)s::vector
+            )
+            ON CONFLICT (chunk_id) DO UPDATE SET
+                source_type = EXCLUDED.source_type,
+                source_ref = EXCLUDED.source_ref,
+                dataset_version = EXCLUDED.dataset_version,
+                text = EXCLUDED.text,
+                metadata = EXCLUDED.metadata,
+                embedding = EXCLUDED.embedding
+        """
+
+        rows = [
+            {
+                "chunk_id": chunk["chunk_id"],
+                "source_type": chunk["source_type"],
+                "source_ref": chunk["source_ref"],
+                "dataset_version": chunk["dataset_version"],
+                "text": chunk["text"],
+                "metadata": json.dumps(chunk.get("metadata", {})),
+                "embedding": _to_vector_literal(chunk["embedding"]),
+            }
+            for chunk in chunks
+        ]
+
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.executemany(query, rows)
+            conn.commit()
+
+    def similarity_search(
+        self, embedding: list[float], top_k: int, filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError("similarity_search is implemented in M3.")
