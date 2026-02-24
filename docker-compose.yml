@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tfmkg}
+      POSTGRES_USER: ${POSTGRES_USER:-tfmkg}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tfmkg}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tfmkg} -d ${POSTGRES_DB:-tfmkg}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  fuseki:
+    image: stain/jena-fuseki:5.1.0
+    environment:
+      # creates a dataset at startup
+      ADMIN_PASSWORD: "admin"
+      FUSEKI_DATASET_1: "${FUSEKI_DATASET:-kg}"
+    ports:
+      - "${FUSEKI_PORT:-3030}:3030"
+    volumes:
+      - fusekidata:/fuseki
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3030/$/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    env_file:
+      - .env
+    environment:
+      # Service-to-service URLs inside compose network
+      DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-tfmkg}:${POSTGRES_PASSWORD:-tfmkg}@postgres:5432/${POSTGRES_DB:-tfmkg}"
+      FUSEKI_URL: "http://fuseki:3030"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      fuseki:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  fusekidata:
