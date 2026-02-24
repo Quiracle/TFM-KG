@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from apps.api.dependencies import get_vector_store
+from apps.api.dependencies import get_telemetry_client, get_vector_store
 from apps.api.main import app
 
 
@@ -30,9 +30,19 @@ class _FakeVectorStore:
         return [{"chunk_id": "chunk-1"}, {"chunk_id": "chunk-2"}]
 
 
+class _FakeTelemetryClient:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def log_query_run(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
 def test_query_text_mode_uses_doc_text_filter_and_debug_ids() -> None:
     fake_store = _FakeVectorStore()
+    fake_telemetry = _FakeTelemetryClient()
     app.dependency_overrides[get_vector_store] = lambda: fake_store
+    app.dependency_overrides[get_telemetry_client] = lambda: fake_telemetry
     client = TestClient(app)
 
     response = client.post(
@@ -47,12 +57,15 @@ def test_query_text_mode_uses_doc_text_filter_and_debug_ids() -> None:
     assert payload["citations"] == []
     assert payload["debug"]["retrieved_chunk_ids"] == ["chunk-1", "chunk-2"]
     assert fake_store.calls[0]["filters"] == {"source_type": "doc_text"}
+    assert fake_telemetry.calls[0]["retrieved_chunk_ids"] == ["chunk-1", "chunk-2"]
     app.dependency_overrides.clear()
 
 
 def test_query_table_and_hybrid_modes_change_filters() -> None:
     fake_store = _FakeVectorStore()
+    fake_telemetry = _FakeTelemetryClient()
     app.dependency_overrides[get_vector_store] = lambda: fake_store
+    app.dependency_overrides[get_telemetry_client] = lambda: fake_telemetry
     client = TestClient(app)
 
     table_response = client.post(
@@ -68,12 +81,15 @@ def test_query_table_and_hybrid_modes_change_filters() -> None:
     assert hybrid_response.status_code == 200
     assert fake_store.calls[0]["filters"] == {"source_type": "table_row"}
     assert fake_store.calls[1]["filters"] == {"source_type": "kg_text"}
+    assert len(fake_telemetry.calls) == 2
     app.dependency_overrides.clear()
 
 
 def test_query_kg_mode_keeps_shape_without_vector_search() -> None:
     fake_store = _FakeVectorStore()
+    fake_telemetry = _FakeTelemetryClient()
     app.dependency_overrides[get_vector_store] = lambda: fake_store
+    app.dependency_overrides[get_telemetry_client] = lambda: fake_telemetry
     client = TestClient(app)
 
     response = client.post(
@@ -90,4 +106,5 @@ def test_query_kg_mode_keeps_shape_without_vector_search() -> None:
     assert isinstance(payload["debug"], dict)
     assert "not implemented" in payload["answer"].lower()
     assert fake_store.calls == []
+    assert fake_telemetry.calls[0]["retrieved_chunk_ids"] == []
     app.dependency_overrides.clear()
