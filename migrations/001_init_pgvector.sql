@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   dataset_version TEXT NOT NULL,
   text TEXT NOT NULL,
   metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  embedding vector(384)               -- adjust dimension to your embedding model
+  embedding vector(768)               -- adjust dimension to your embedding model
 );
 
 -- Helpful indexes
