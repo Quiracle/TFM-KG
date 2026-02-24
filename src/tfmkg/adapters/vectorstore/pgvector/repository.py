@@ -69,4 +69,44 @@ class PgVectorRepository(VectorStorePort):
     def similarity_search(
         self, embedding: list[float], top_k: int, filters: dict[str, Any]
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError("similarity_search is implemented in M3.")
+        where_parts: list[str] = []
+        params: dict[str, Any] = {
+            "query_embedding": _to_vector_literal(embedding),
+            "top_k": top_k,
+        }
+
+        source_type = filters.get("source_type")
+        if source_type:
+            where_parts.append("source_type = %(source_type)s")
+            params["source_type"] = source_type
+
+        dataset_version = filters.get("dataset_version")
+        if dataset_version:
+            where_parts.append("dataset_version = %(dataset_version)s")
+            params["dataset_version"] = dataset_version
+
+        where_clause = ""
+        if where_parts:
+            where_clause = "WHERE " + " AND ".join(where_parts)
+
+        query = f"""
+            SELECT
+                chunk_id,
+                source_type,
+                source_ref,
+                dataset_version,
+                text,
+                metadata,
+                embedding <=> %(query_embedding)s::vector AS distance
+            FROM chunks
+            {where_clause}
+            ORDER BY embedding <=> %(query_embedding)s::vector ASC
+            LIMIT %(top_k)s
+        """
+
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(query, params)
+                rows = cur.fetchall()
+
+        return [dict(row) for row in rows]
