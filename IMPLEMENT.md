@@ -168,12 +168,163 @@ Build an evidence pack and generate a deterministic placeholder answer using onl
 
 ---
 
-## M8 — Optional: real LLM integration (separate PR)
+## M8 — LLM + Embeddings integration (Ollama default, OpenAI optional)
 
 ### Goal
-Swap deterministic answer for LLM generation with a strict “use evidence only” prompt.
+Enable real RAG generation with:
+- Local Ollama embeddings using **embeddinggemma**
+- Local Ollama chat generation using **mistral:7b**
+- Optional OpenAI backend for embeddings and/or chat via environment switch
+
+This milestone must keep the `/query` response shape stable and remain evidence-grounded.
+
+---
+
+### Environment variables (must be supported)
+
+#### Provider selection
+- `EMBEDDINGS_PROVIDER`: `ollama` (default) | `openai`
+- `LLM_PROVIDER`: `ollama` (default) | `openai`
+
+#### Ollama
+- `OLLAMA_BASE_URL`: default `http://ollama:11434` in Docker, `http://localhost:11434` outside
+- `OLLAMA_EMBED_MODEL`: default `embeddinggemma`
+- `OLLAMA_LLM_MODEL`: default `mistral:7b`
+- `OLLAMA_TIMEOUT_S`: default `60`
+- `OLLAMA_STREAM`: `false` default (streaming can be added later)
+
+Notes:
+- Use Ollama embeddings capability docs as reference for embeddings endpoint behavior and model selection. (Recommended embedding models include `embeddinggemma`.) 
+- Vector length depends on the model; do not hardcode embedding dimension. Store the dimension in config/metadata, and validate it matches the DB schema or update schema accordingly.
+
+#### OpenAI
+- `OPENAI_API_KEY`: required if provider is `openai`
+- `OPENAI_BASE_URL`: optional (defaults to OpenAI)
+- `OPENAI_EMBED_MODEL`: default to a current embeddings model available in your OpenAI account
+- `OPENAI_LLM_MODEL`: default to a current chat model available in your OpenAI account
+- Prefer OpenAI **Responses API** for new integrations.
+
+---
+
+### Architecture / code placement
+
+#### Ports (domain)
+- `EmbeddingModelPort`:
+  - `embed_texts(texts: list[str]) -> list[list[float]]`
+  - `embed_query(text: str) -> list[float]`
+- `LLMClientPort`:
+  - `generate(messages: list[LLMMessage], **params) -> LLMResult`
+
+#### Adapters (implementations)
+Create:
+- `src/tfmkg/adapters/embeddings/ollama_embeddings.py`
+- `src/tfmkg/adapters/llm/ollama_chat.py`
+- `src/tfmkg/adapters/embeddings/openai_embeddings.py`
+- `src/tfmkg/adapters/llm/openai_responses.py`
+
+All adapters must:
+- be pure clients (no retrieval logic)
+- implement retries/backoff for transient network errors
+- return typed results with minimal post-processing
+
+#### Wiring (dependency injection)
+- `apps/api/deps.py` chooses providers based on `*_PROVIDER` env vars.
+- Retrieval pipeline stays unchanged: it calls ports, not concrete adapters.
+
+---
+
+### Ollama API requirements
+
+#### Embeddings
+- Implement embeddings generation using Ollama’s embeddings capability.
+- Provide a single function that accepts a batch of texts and returns vectors.
+- Handle: empty inputs, long text (truncate strategy or chunk pre-step), timeouts.
+- Log basic timing and model used (but never log raw user prompts unless explicitly configured).
+
+#### Chat generation
+- Implement chat generation using Ollama’s API (either the native Ollama endpoints or its OpenAI-compat mode, but pick ONE for MVP and keep it consistent).
+- Must support:
+  - system + user messages
+  - temperature (default low, e.g., 0.2)
+  - max tokens / output length (reasonable default)
+
+Note:
+- Ollama has an OpenAI-compatibility mode that supports the OpenAI Responses API (non-stateful flavor). If you use it, document limitations (no conversation state via previous_response_id).
+
+---
+
+### Prompting: evidence-grounded answers (must implement)
+
+Create a strict “Answer only from evidence” prompt template:
+- If evidence is insufficient, respond with an abstention:
+  - `"I don’t have enough information in the provided sources to answer that."`
+- Always include a “Citations” section in output OR return citations in the response object (preferred: return citations separately as structured data).
+
+The prompt must:
+- instruct the model to not invent facts
+- require that each claim is supported by the evidence pack
+- encourage short, factual answers
+
+---
+
+### Telemetry updates (extend M6 behavior)
+When `LLM_PROVIDER` or `EMBEDDINGS_PROVIDER` is enabled:
+- Log in `runs`:
+  - `llm_provider`, `llm_model`
+  - `embeddings_provider`, `embed_model`
+  - `prompt_tokens`, `completion_tokens` if available (OpenAI typically provides; Ollama may not)
+  - `abstained` decision
+- Keep `evidence_pack` stored, to allow auditing.
+
+---
 
 ### Acceptance criteria
-- If no evidence: model abstains (“not enough information”)
-- Every non-trivial claim is supported by citations (at least chunk-level)
-- Telemetry logs prompt params + abstain decision
+
+1) Ollama end-to-end
+- With Ollama running locally (or as a service in compose), `/query` with `mode=hybrid`:
+  - retrieves evidence
+  - generates an answer via `mistral:7b`
+  - returns non-empty `citations` referring to retrieved chunks
+
+2) Evidence grounding
+- If retriever returns 0 hits, the system **must abstain** (no hallucinated answers).
+- If retriever returns hits, the answer must quote/reflect evidence and provide citations.
+
+3) OpenAI switch
+- Setting:
+  - `LLM_PROVIDER=openai` uses OpenAI generation
+  - `EMBEDDINGS_PROVIDER=openai` uses OpenAI embeddings
+- Mixed mode must work (e.g., Ollama embeddings + OpenAI generation).
+
+4) Reliability
+- Requests fail gracefully with clear errors when:
+  - Ollama is unreachable
+  - required models are not available/pulled
+  - OpenAI key is missing/invalid
+
+5) Reproducibility
+- Telemetry logs provider + model names for every run.
+- The response shape from `/query` remains stable.
+
+---
+
+### Verification steps
+
+#### Local Ollama (outside Docker)
+1) Ensure Ollama is running.
+2) Pull models:
+   - `ollama pull embeddinggemma`
+   - `ollama pull mistral:7b`
+3) Run compose services (API+DB+Fuseki), pointing to your local Ollama:
+   - set `OLLAMA_BASE_URL=http://host.docker.internal:11434` (Docker Desktop) or run Ollama as a compose service.
+4) Test:
+   - `curl -s -X POST http://localhost:8000/query -H 'Content-Type: application/json' -d '{"question":"What is X?","mode":"hybrid","top_k":5}'`
+
+#### OpenAI
+1) Export `OPENAI_API_KEY`
+2) Set providers:
+   - `LLM_PROVIDER=openai`
+   - `EMBEDDINGS_PROVIDER=openai`
+3) Repeat the `/query` test.
+
+Document any platform-specific Docker networking notes in README.

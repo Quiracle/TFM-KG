@@ -42,6 +42,9 @@ services:
       # Service-to-service URLs inside compose network
       DATABASE_URL: "postgresql+psycopg://${POSTGRES_USER:-tfmkg}:${POSTGRES_PASSWORD:-tfmkg}@postgres:5432/${POSTGRES_DB:-tfmkg}"
       FUSEKI_URL: "http://fuseki:3030"
+      OLLAMA_BASE_URL: "http://ollama:11434"
+      OLLAMA_EMBED_MODEL: "embeddinggemma"
+      OLLAMA_LLM_MODEL: "mistral:7b"
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -49,7 +52,23 @@ services:
         condition: service_healthy
       fuseki:
         condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"   # optional: expose to host for manual testing
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
 volumes:
   pgdata:
   fusekidata:
+  ollama:

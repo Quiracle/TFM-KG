@@ -20,6 +20,7 @@ class PostgresTelemetryClient:
         retrieved_chunk_ids: list[str],
         evidence_pack: dict,
         answer: str,
+        abstained: bool,
         latency_ms: int,
         dataset_version: str = "dev",
     ) -> None:
@@ -41,7 +42,7 @@ class PostgresTelemetryClient:
                 %(retrieved_chunk_ids)s::jsonb,
                 %(evidence_pack)s::jsonb,
                 %(answer)s,
-                FALSE,
+                %(abstained)s,
                 %(latency_ms)s,
                 %(dataset_version)s
             )
@@ -53,6 +54,7 @@ class PostgresTelemetryClient:
             "retrieved_chunk_ids": json.dumps(retrieved_chunk_ids),
             "evidence_pack": json.dumps(evidence_pack),
             "answer": answer,
+            "abstained": abstained,
             "latency_ms": latency_ms,
             "dataset_version": dataset_version,
         }
