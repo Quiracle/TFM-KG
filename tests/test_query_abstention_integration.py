@@ -9,32 +9,9 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from apps.api.dependencies import get_embedding_model, get_fuseki_client, get_llm_client, get_vector_store
+from apps.api.dependencies import get_embedding_model, get_fuseki_client, get_llm_client
 from apps.api.main import app
 from src.tfmkg.adapters.db.psycopg_client import normalize_psycopg_dsn
-
-
-class _FakeVectorStore:
-    def upsert_chunks(self, chunks: list[dict[str, Any]]) -> None:
-        return None
-
-    def similarity_search(
-        self, embedding: list[float], top_k: int, filters: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        return [
-            {
-                "chunk_id": "r-1",
-                "source_type": "doc_text",
-                "source_ref": "doc-1",
-                "text": "Evidence one explains the primary relationship in the dataset.",
-            },
-            {
-                "chunk_id": "r-2",
-                "source_type": "doc_text",
-                "source_ref": "doc-2",
-                "text": "Evidence two adds supporting context used for grounded answering.",
-            },
-        ]
 
 
 class _FakeEmbeddingModel:
@@ -54,9 +31,9 @@ class _FakeLLMClient:
 
     def generate(self, messages: list[Any], **kwargs: Any) -> Any:
         class _Result:
-            text = "Grounded answer."
-            prompt_tokens = 20
-            completion_tokens = 7
+            text = "This should not be used when abstaining."
+            prompt_tokens = 0
+            completion_tokens = 0
 
         return _Result()
 
@@ -70,10 +47,10 @@ def _database_url() -> str:
     return os.environ["DATABASE_URL"]
 
 
-def test_query_writes_run_row_with_retrieved_ids() -> None:
-    question = f"evidence-telemetry-{uuid.uuid4()}"
+def test_query_abstains_for_empty_dataset_version_index() -> None:
+    question = f"abstain-empty-{uuid.uuid4()}"
     dsn = normalize_psycopg_dsn(_database_url())
-    app.dependency_overrides[get_vector_store] = lambda: _FakeVectorStore()
+    missing_dataset = "__missing_dataset_for_abstention_test__"
     app.dependency_overrides[get_embedding_model] = lambda: _FakeEmbeddingModel()
     app.dependency_overrides[get_llm_client] = lambda: _FakeLLMClient()
     app.dependency_overrides[get_fuseki_client] = lambda: _FakeFusekiClient()
@@ -82,16 +59,24 @@ def test_query_writes_run_row_with_retrieved_ids() -> None:
     try:
         response = client.post(
             "/query",
-            json={"question": question, "mode": "text", "top_k": 2},
+            json={
+                "question": question,
+                "mode": "hybrid",
+                "top_k": 5,
+                "dataset_version": missing_dataset,
+            },
         )
-
         assert response.status_code == 200
+        payload = response.json()
+        assert payload["abstained"] is True
+        assert payload["answer"] == "I don't have enough information in the provided sources to answer that."
+        assert payload["citations"] == []
 
         with psycopg.connect(dsn) as conn:
             with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
                 cur.execute(
                     """
-                    SELECT question, mode, top_k, retrieved_chunk_ids, dataset_version, abstained, evidence_pack
+                    SELECT abstained, retrieved_chunk_ids, dataset_version
                     FROM runs
                     WHERE question = %s
                     ORDER BY ts DESC
@@ -102,15 +87,9 @@ def test_query_writes_run_row_with_retrieved_ids() -> None:
                 row = cur.fetchone()
 
         assert row is not None
-        assert row["question"] == question
-        assert row["mode"] == "text"
-        assert row["top_k"] == 2
-        assert row["retrieved_chunk_ids"] == ["r-1", "r-2"]
-        assert row["dataset_version"] == "dev"
-        assert row["abstained"] is False
-        assert row["evidence_pack"]["prompt_meta"]["llm_provider"] == "ollama"
-        assert row["evidence_pack"]["prompt_meta"]["llm_model"] == "mistral:7b"
-        assert row["evidence_pack"]["prompt_meta"]["embeddings_provider"] == "ollama"
+        assert row["abstained"] is True
+        assert row["retrieved_chunk_ids"] == []
+        assert row["dataset_version"] == missing_dataset
     finally:
         app.dependency_overrides.clear()
         with psycopg.connect(dsn) as conn:

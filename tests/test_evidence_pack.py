@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.tfmkg.core.evidence import answer_from_evidence, build_evidence_pack
+from src.tfmkg.core.evidence import answer_from_evidence, build_evidence_pack, should_abstain
 
 
 def test_build_evidence_pack_and_answer_from_retrieved_chunks() -> None:
@@ -33,3 +33,44 @@ def test_build_evidence_pack_and_answer_from_retrieved_chunks() -> None:
 
 def test_answer_from_evidence_handles_empty_facts() -> None:
     assert answer_from_evidence([]) == "Not enough evidence found in retrieved chunks."
+
+
+def test_should_abstain_when_no_retrieval_hits() -> None:
+    abstain, reason = should_abstain(
+        question="Who wrote this?",
+        retrieval_hits=[],
+        evidence_text="",
+    )
+    assert abstain is True
+    assert reason == "no_retrieval_hits"
+
+
+def test_should_abstain_when_evidence_is_too_short() -> None:
+    abstain, reason = should_abstain(
+        question="Who wrote this?",
+        retrieval_hits=[{"chunk_id": "c1"}],
+        evidence_text="Too short.",
+        min_evidence_chars=20,
+    )
+    assert abstain is True
+    assert reason == "insufficient_evidence_length"
+
+
+def test_should_abstain_when_question_and_evidence_do_not_overlap() -> None:
+    abstain, reason = should_abstain(
+        question="Who discovered penicillin?",
+        retrieval_hits=[{"chunk_id": "c1"}],
+        evidence_text="Saturn has prominent rings and many moons in orbit.",
+    )
+    assert abstain is True
+    assert reason == "no_question_evidence_overlap"
+
+
+def test_should_not_abstain_when_evidence_is_sufficient_and_overlaps() -> None:
+    abstain, reason = should_abstain(
+        question="Who discovered penicillin?",
+        retrieval_hits=[{"chunk_id": "c1"}],
+        evidence_text="Penicillin was discovered by Alexander Fleming in 1928.",
+    )
+    assert abstain is False
+    assert reason is None

@@ -110,3 +110,40 @@ class PgVectorRepository(VectorStorePort):
                 rows = cur.fetchall()
 
         return [dict(row) for row in rows]
+
+    def index_stats(self) -> dict[str, Any]:
+        by_source_type_query = """
+            SELECT source_type, COUNT(*) AS count
+            FROM chunks
+            GROUP BY source_type
+            ORDER BY source_type
+        """
+        by_dataset_version_query = """
+            SELECT dataset_version, COUNT(*) AS count
+            FROM chunks
+            GROUP BY dataset_version
+            ORDER BY dataset_version
+        """
+        inferred_dim_query = """
+            SELECT vector_dims(embedding) AS embedding_dim
+            FROM chunks
+            WHERE embedding IS NOT NULL
+            LIMIT 1
+        """
+
+        with psycopg.connect(self._dsn) as conn:
+            with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
+                cur.execute(by_source_type_query)
+                by_source_type = [dict(row) for row in cur.fetchall()]
+
+                cur.execute(by_dataset_version_query)
+                by_dataset_version = [dict(row) for row in cur.fetchall()]
+
+                cur.execute(inferred_dim_query)
+                dim_row = cur.fetchone()
+
+        return {
+            "counts_by_source_type": by_source_type,
+            "counts_by_dataset_version": by_dataset_version,
+            "embedding_dim_inferred": None if dim_row is None else dim_row["embedding_dim"],
+        }

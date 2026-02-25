@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     ollama_embed_model: str = "embeddinggemma"
     ollama_llm_model: str = "mistral:7b"
-    ollama_timeout_s: int = 60
+    ollama_timeout_s: int = 120
     ollama_stream: bool = False
 
     # OpenAI

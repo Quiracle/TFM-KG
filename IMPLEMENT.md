@@ -328,3 +328,156 @@ When `LLM_PROVIDER` or `EMBEDDINGS_PROVIDER` is enabled:
 3) Repeat the `/query` test.
 
 Document any platform-specific Docker networking notes in README.
+
+## M9 — Retrieval debug output + index stats (observability)
+
+### Goal
+Make retrieval transparent and measurable so you can debug relevance, grounding, and dataset drift.
+
+### Implementation
+1) Add `GET /stats/index`:
+   - returns counts grouped by `source_type`
+   - returns counts grouped by `dataset_version`
+   - returns `embedding_dim` currently configured (and/or inferred from one stored row)
+   - returns current providers/models (LLM + embeddings)
+
+2) Add debug output to `/query` (no behavior change when debug is off):
+   - Extend `QueryRequest` with `debug: bool = false`
+   - When `debug=true`, `QueryResponse.debug` must include:
+     - `retrieval_hits`: list of `{chunk_id, source_type, source_ref, score}`
+     - `evidence_text`: the exact evidence pack string passed to the LLM
+     - `dataset_version` used
+     - `providers`: `{llm_provider, llm_model, embeddings_provider, embed_model}`
+
+### Acceptance criteria
+- `curl -s http://localhost:8000/stats/index` returns JSON with the fields above.
+- `/query` works the same as before when `debug=false`.
+- `/query` with `debug=true` includes hit IDs + scores and evidence text.
+
+## M10 — Grounding + abstention test suite (hallucination control)
+
+### Goal
+Prove the system abstains when evidence is missing or insufficient, and always returns citations when it answers.
+
+### Implementation
+1) Enforce strict policy in RAG pipeline:
+   - If `retrieval_hits` is empty ⇒ answer must be the configured abstention string; `abstained=true`
+   - If evidence pack exists but does not support answering (simple heuristic ok for now):
+     - e.g., evidence pack length < N chars or no named entities overlap ⇒ abstain
+   - When not abstaining, return non-empty `citations`
+
+2) Add tests:
+   - Unit tests for the abstention policy function
+   - Integration test calling `/query` against an empty pgvector table (or filtered dataset_version) must abstain
+
+3) Add `eval/question_sets/trap_questions.jsonl` with 10+ “not in KG” questions.
+
+### Acceptance criteria
+- With empty index, `/query` returns `abstained=true` and abstention message.
+- With non-empty index, answer includes citations for retrieved chunks.
+- `pytest` passes.
+
+## M11 — Minimal SPARQL adapter + KG retrieval mode (KG lane)
+
+### Goal
+Enable KG-native retrieval for `mode="kg"` using Fuseki SPARQL (no embeddings).
+
+### Implementation
+1) Create Fuseki SPARQL adapter:
+   - `sparql(query: str) -> dict` (JSON results)
+   - configurable dataset URL from settings
+
+2) Implement KG retriever:
+   - For MVP: for a user question, do one of:
+     - A) keyword-based label search (SPARQL `FILTER CONTAINS(LCASE(STR(?label)), ...)`)
+     - B) fallback to `SELECT ?s ?p ?o LIMIT 25` if search yields nothing
+   - Build EvidencePack from returned triples, include URIs.
+
+3) Wire `/query`:
+   - if `mode="kg"` use KG retriever and skip vector store.
+
+### Acceptance criteria
+- `curl -s http://localhost:8000/kg/ping` (or equivalent) returns ok.
+- `/query` with `mode="kg"` returns an answer derived from SPARQL evidence (or abstains).
+- Debug output for mode kg includes returned triples and evidence pack.
+
+## M12 — Indexing pipeline: KG → kg_text chunks → pgvector embeddings
+
+### Goal
+Generate embeddings into Postgres from your existing KG test data.
+
+### Implementation
+1) Implement CLI indexer (recommended):
+   - `python -m tfmkg.scripts.index_kg --limit 200 --dataset_version dev`
+   - Steps:
+     - SPARQL: list distinct subject URIs
+     - For each URI: fetch up to N triples + optional label
+     - Build deterministic “entity card” text
+     - Batch embed with embedding provider
+     - Upsert into `chunks` as `source_type="kg_text"`
+
+2) Ensure chunk IDs are stable:
+   - `chunk_id = hash(dataset_version + uri + text_template_version + text)`
+
+3) Handle embedding dimension:
+   - Validate embedding length matches DB vector dimension
+   - If mismatch: fail with explicit error telling which migration to apply
+
+### Acceptance criteria
+- Running the indexer inserts >0 rows into `chunks`:
+  - `SELECT COUNT(*) FROM chunks WHERE source_type='kg_text';`
+- `/query mode=hybrid debug=true` shows retrieved `kg_text` hits.
+- Re-running indexer is idempotent (row count stable, updated timestamps optional).
+
+## M13 — Text and table lanes (comparative benchmark plumbing)
+
+### Goal
+Enable `mode="text"` and `mode="table"` lanes so you can run KG vs text vs table comparisons.
+
+### Implementation
+1) Create synthetic `doc_text` and `table_row` datasets from KG (MVP):
+   - `doc_text`: a paragraph-style description per entity (can reuse card but different formatting)
+   - `table_row`: a single-line CSV-like row per entity: `uri|label|date|creator|place|...` (fill unknown with blank)
+
+2) Extend indexer to optionally create these:
+   - `--include_doc_text`
+   - `--include_table_rows`
+
+3) Wire retrieval:
+   - `mode="text"` filters vector store `source_type="doc_text"`
+   - `mode="table"` filters vector store `source_type="table_row"`
+   - `mode="hybrid"` stays `kg_text` (for now)
+
+### Acceptance criteria
+- After indexing with both flags:
+  - counts exist for `doc_text` and `table_row`
+- `/query` returns different hits depending on mode (confirmed via debug).
+
+## M14 — Benchmark runner + reproducibility package (CSV export)
+
+### Goal
+Run a repeatable benchmark across modes and export results for analysis.
+
+### Implementation
+1) Create `eval/scripts/run_benchmark.py`:
+   - Reads JSONL of `{id, question}` from `eval/question_sets/*.jsonl`
+   - For each question, runs modes: `kg`, `text`, `table`, `hybrid`
+   - Calls `/query` (HTTP) with `debug=false` by default
+   - Writes `eval/out/results.csv` with:
+     - question_id, question, mode
+     - answer, abstained
+     - citations_count
+     - latency_ms (from telemetry or response)
+     - dataset_version
+     - providers/models
+
+2) Add at least two question sets:
+   - `kg_questions.jsonl` (answerable from KG)
+   - `trap_questions.jsonl` (should abstain)
+
+3) Document exact commands in README.
+
+### Acceptance criteria
+- `python eval/scripts/run_benchmark.py` produces a CSV with rows = questions * 4 modes.
+- Results include abstentions for trap questions in all modes.
+- Telemetry rows exist for each run (if you log query runs centrally).
