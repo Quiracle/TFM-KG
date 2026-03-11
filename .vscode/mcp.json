@@ -1,0 +1,15 @@
+{
+  "servers": {
+    "tfmkg-kg": {
+      "type": "stdio",
+      "command": ".venv/Scripts/python.exe",
+      "args": ["-m", "mcp_kg_server"],
+      "env": {
+        "FUSEKI_URL": "http://localhost:3030",
+        "FUSEKI_DATASET": "kg",
+        "MCP_KG_TIMEOUT_MS": "10000",
+        "MCP_KG_MAX_ROWS": "200"
+      }
+    }
+  }
+}
