@@ -1,0 +1,3 @@
+{"timestamp": "2026-03-11T11:28:01.222819+00:00", "tool_name": "schema_summary", "request": {"limit": null}, "row_count": null, "truncated": null, "latency_ms": 10053, "errors": {"type": "ToolError", "message": "Error executing tool schema_summary: Fuseki query timed out after 10000ms."}}
+{"timestamp": "2026-03-11T11:28:14.590321+00:00", "tool_name": "ping", "request": {}, "row_count": null, "truncated": null, "latency_ms": 1, "errors": null}
+{"timestamp": "2026-03-11T11:28:26.849028+00:00", "tool_name": "schema_summary", "request": {"limit": 5}, "row_count": null, "truncated": null, "latency_ms": 6503, "errors": null}
