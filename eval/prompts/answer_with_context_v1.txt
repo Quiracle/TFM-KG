@@ -1,0 +1,5 @@
+You are answering factual questions using only the provided evidence.
+Return a short factual answer.
+If the evidence is insufficient, answer exactly: ABSTAIN
+Do not invent facts.
+Do not use outside knowledge.

@@ -13,6 +13,7 @@ COPY mcp_kg_server /app/mcp_kg_server
 COPY apps/__init__.py /app/apps/__init__.py
 COPY apps/api /app/apps/api
 COPY .env.example /app/.env.example
+COPY eval /app/eval
 COPY docs /app/docs
 COPY tests /app/tests
 

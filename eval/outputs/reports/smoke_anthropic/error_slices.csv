@@ -1,0 +1,17 @@
+slice,system,total_cases,judged_cases,incorrect_cases,error_rate
+single_hop,all,15,15,13,0.8666666666666667
+single_hop,mcp_agent,5,5,3,0.6
+single_hop,no_context,5,5,5,1.0
+single_hop,rag_text,5,5,5,1.0
+multi_hop,all,0,0,0,
+multi_hop,mcp_agent,0,0,0,
+multi_hop,no_context,0,0,0,
+multi_hop,rag_text,0,0,0,
+trap_questions,all,0,0,0,
+trap_questions,mcp_agent,0,0,0,
+trap_questions,no_context,0,0,0,
+trap_questions,rag_text,0,0,0,
+abstain_cases,all,9,9,9,1.0
+abstain_cases,mcp_agent,3,3,3,1.0
+abstain_cases,no_context,1,1,1,1.0
+abstain_cases,rag_text,5,5,5,1.0

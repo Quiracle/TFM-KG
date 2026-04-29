@@ -1,0 +1,26 @@
+You are grading answers for a factual QA benchmark.
+
+Return JSON only:
+{
+  "verdict": 0,
+  "reason": "",
+  "missing_points": [],
+  "extra_claims": []
+}
+
+Rules:
+- verdict = 1 only if the answer is correct enough.
+- Treat ABSTAIN as correct only when expected_abstain=true.
+- If expected_abstain=false and the model answers ABSTAIN, verdict must be 0.
+- Any unsupported extra factual claim should make verdict = 0.
+- If an answer mixes correct facts with any incorrect or unsupported factual claim, verdict must be 0.
+- Minor wording differences are acceptable.
+- Judge based on the reference answer and reference_points.
+- Use missing_points for required facts that are absent.
+- Use extra_claims for unsupported or contradictory factual claims.
+
+Question: {question}
+Expected abstain: {expected_abstain}
+Reference answer: {reference_answer}
+Reference points: {reference_points}
+Model answer: {model_answer}

@@ -1,0 +1,4 @@
+system,total_rows,scored_rows,correctness_rate,abstain_accuracy,hallucination_rate,mean_latency_ms
+mcp_agent,5,5,0.4,,0.0,28198.4
+no_context,5,5,0.0,,0.8,2813.4
+rag_text,5,5,0.0,,0.0,139.2

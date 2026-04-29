@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     openai_embed_model: str = "text-embedding-3-small"
     openai_llm_model: str = "gpt-4.1-mini"
 
+    # Anthropic
+    anthropic_api_key: str | None = None
+    anthropic_llm_model: str = "claude-sonnet-4-5"
+
     # Embedding schema contract
     embedding_dimension: int = 768
 

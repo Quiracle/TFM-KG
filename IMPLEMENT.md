@@ -1,249 +1,617 @@
-# IMPLEMENT.md — MCP KG Server (Fuseki) + Iterative Tool-Query QA
+# RAGAS Evaluation Implementation Plan for TFM-KG
 
-## Overview
-We will implement an MCP server that exposes safe, read-only tools for querying the Knowledge Graph (Fuseki via SPARQL).
-The client (Codex / VS Code) can call these tools iteratively to refine queries.
+## Goal
 
-Key principles:
-- Read-only queries only (no SPARQL UPDATE).
-- Strong tool schemas (helps LLM use tools correctly).
-- Result-size and timeout limits to prevent runaway queries.
-- Telemetry logs all tool calls (query + row_count + latency).
-- Server runs via stdio transport for VS Code MCP.
+Implement a reproducible evaluation pipeline that compares three systems on the same question set:
 
-References (non-exhaustive):
-- MCP Python SDK and server examples.
-- MCP tools and prompts concepts.
-- VS Code MCP server configuration docs.
+1. **LLM only**: Claude answers with no repository context.
+2. **RAG**: existing `/query` endpoint using `mode="text"`.
+3. **MCP**: Claude agent answers by using the existing MCP KG server tools.
 
----
+The evaluation must:
 
-## Shared verification commands
-
-### Boot Fuseki + Postgres + API (existing stack)
-- `docker compose up --build -d`
-
-### Run MCP server locally (stdio)
-- `python -m mcp_kg_server`
-
-### Quick tool smoke test (manual)
-Use VS Code MCP tools UI / Codex tool calls. (See M1 for VS Code config.)
+- use **Claude API** for answer generation and MCP agent calls,
+- use **a lightweight judge model** to score answers,
+- use **RAGAS** for structured evaluation,
+- preserve the current app architecture and API contracts,
+- produce thesis-ready outputs: raw runs, scored runs, summary tables, and error slices.
 
 ---
 
-## Milestone M0 — Add MCP server skeleton
+## Repository Context You Must Respect
+
+Before coding, inspect these files and derive your plan from them:
+
+- `AGENTS.md`
+- `README.md`
+- `IMPLEMENT.md`
+- `pyproject.toml`
+- `apps/api/dependencies.py`
+- `apps/api/routers/query.py`
+- `apps/api/schemas/query.py`
+- `src/tfmkg/core/evidence.py`
+- `src/tfmkg/adapters/llm/*`
+- `mcp_kg_server/**`
+- `eval/question_sets/trap_questions.jsonl`
+
+Important repo constraints:
+
+- Work in **small, reviewable diffs**.
+- Do **not** introduce new infrastructure services.
+- Preserve `/query` response shape.
+- Keep module boundaries clean.
+- Prefer integration with existing adapters and settings instead of creating parallel stacks.
+
+---
+
+## Key Design Decisions
+
+### 1) Keep the answering model fixed across systems
+
+Use the same main answering model for all three systems so the comparison isolates the retrieval/tooling effect.
+
+Recommended:
+
+- **Answer model**: `claude-sonnet-4-6`
+- **Judge model**: `claude-haiku-4-5-20251001`
+
+### 2) Use one strict answer contract
+
+All systems must follow the same answer policy.
+
+Canonical abstain string:
+
+```text
+ABSTAIN
+```
+
+This is intentionally stricter than the current `/query` abstain message. Normalize all evaluation-facing outputs to this exact string.
+
+### 3) Make MCP evaluation deterministic enough to benchmark
+
+For MCP runs, do not evaluate free-form editor behavior. Implement a controlled evaluation runner that:
+
+- starts from the question,
+- exposes the MCP tools to Claude,
+- allows tool-use loops up to a fixed max iteration count,
+- captures every tool call,
+- ends when Claude returns a final answer or the loop budget is exhausted.
+
+Suggested limits:
+
+- `max_iterations = 6`
+- `max_tool_calls_per_turn = 4`
+- `temperature = 0`
+
+### 4) Use RAGAS in a practical way
+
+Use RAGAS for:
+
+- **binary correctness judge** via a custom discrete / aspect-style metric,
+- **faithfulness** for RAG and MCP runs,
+- **context precision** for RAG and MCP runs,
+- **context recall** for RAG and MCP runs.
+
+For answer correctness, prefer this staged approach:
+
+- **Phase 1**: implement binary correctness with an LLM judge first.
+- **Phase 2**: optionally add `AnswerCorrectness` if you are willing to add an embeddings dependency for semantic similarity.
+
+This avoids blocking the project on embeddings setup while still using RAGAS effectively.
+
+---
+
+## What To Implement
+
+## Milestone 0 — Repo reading and plan freeze
 
 ### Goal
-Create a new Python package `mcp_kg_server` with an MCP server running over stdio.
 
-### Implementation
-1) Add new top-level folder:
-   - `mcp_kg_server/`
-     - `__init__.py`
-     - `server.py`
-     - `settings.py`
-     - `tools/`
-     - `prompts/`
-2) Add dependency:
-   - add MCP Python SDK to `pyproject.toml` (e.g. `mcp` as per SDK docs)
-3) Server must:
-   - start successfully with `python -m mcp_kg_server`
-   - register at least one trivial tool: `ping() -> {status:"ok"}`
+Understand the current code paths and identify the minimum-change integration points.
+
+### Tasks
+
+- Read the files listed above.
+- Confirm how `/query` currently behaves for `kg`, `text`, `table`, and `hybrid`.
+- Confirm current LLM adapter structure and settings flow.
+- Confirm how the MCP server is started and how tools are registered.
+- Produce a short implementation note before coding:
+  - affected files,
+  - risks,
+  - assumptions,
+  - milestone order.
 
 ### Acceptance criteria
-- Running `python -m mcp_kg_server` starts without exceptions.
-- VS Code can connect to it and list tools (at least `ping`).
+
+- You can explain, in repo-specific terms, how each of the 3 benchmarked systems will run.
+- You identify where Anthropic support must be added.
 
 ---
 
-## Milestone M1 — VS Code MCP configuration + docs
+## Milestone 1 — Add Anthropic LLM support
 
 ### Goal
-Make it easy to connect VS Code to the MCP server.
 
-### Implementation
-1) Add `docs/mcp-vscode-setup.md` with:
-   - how to register the server in VS Code MCP settings
-   - example config snippet (command + args + env)
-2) Add `.env.example` entries for Fuseki config used by MCP server:
-   - `FUSEKI_URL`
-   - `FUSEKI_DATASET`
-   - `MCP_KG_TIMEOUT_MS`
-   - `MCP_KG_MAX_ROWS`
+Allow the project to use Claude through the same adapter abstraction used by the rest of the app.
+
+### Tasks
+
+Add Anthropic support to the existing LLM adapter layer.
+
+Expected changes:
+
+- `pyproject.toml`
+- `src/tfmkg/adapters/llm/anthropic_messages.py` (or similar name)
+- `src/tfmkg/adapters/llm/__init__.py`
+- `src/tfmkg/core/config.py`
+- `apps/api/dependencies.py`
+- `.env.example`
+
+### Requirements
+
+- Support standard text generation through the existing `LLMClientPort`.
+- Reuse the existing `LLMMessage` / `LLMResult` contract.
+- Read provider/model/api key from settings.
+- Preserve OpenAI and Ollama behavior.
+- Include retries and clear runtime errors.
+
+### Suggested settings
+
+Add:
+
+- `anthropic_api_key`
+- `anthropic_base_url` (optional; default official API URL)
+- `anthropic_llm_model`
 
 ### Acceptance criteria
-- Following the docs, a developer can connect VS Code to the MCP server and call `ping`.
+
+- Setting `LLM_PROVIDER=anthropic` works for normal generation.
+- Existing providers still work.
+- No unrelated refactors.
 
 ---
 
-## Milestone M2 — Core tool: sparql_query (read-only, safe)
+## Milestone 2 — Add evaluation package structure
 
 ### Goal
-Expose a `sparql_query` tool that can query Fuseki safely.
 
-### Tool: `sparql_query`
-**Input schema**
-- `query: string` (required)
-- `timeout_ms: int` (optional; default from env)
-- `max_rows: int` (optional; default from env)
+Create a clean home for benchmark artifacts and scripts.
 
-**Output schema**
-- `row_count: int`
-- `head: object` (SPARQL JSON head)
-- `results: object` (SPARQL JSON results)
-- `truncated: bool`
-- `latency_ms: int`
+### Tasks
 
-### Safety requirements
-Reject queries containing (case-insensitive):
-- `INSERT`, `DELETE`, `LOAD`, `CLEAR`, `DROP`, `CREATE`, `MOVE`, `COPY`, `ADD`
-Also reject multiple statements separated by `;` (simple heuristic ok).
+Create or extend:
 
-Enforce:
-- Always apply `LIMIT max_rows` if query lacks a LIMIT (simple parser/regex acceptable for MVP).
-- Apply HTTP timeout.
+```text
+eval/
+  datasets/
+    core_eval_v1.jsonl
+    trap_questions.jsonl
+  prompts/
+    answer_no_context_v1.txt
+    answer_with_context_v1.txt
+    mcp_agent_v1.txt
+    judge_correctness_v1.txt
+  runners/
+    run_no_context.py
+    run_rag_text.py
+    run_mcp_agent.py
+    common.py
+  scoring/
+    ragas_metrics.py
+    judge_binary.py
+    normalize.py
+  reports/
+    summarize_results.py
+  outputs/
+    raw/
+    scored/
+    reports/
+```
 
 ### Acceptance criteria
-- Calling `sparql_query` with a valid SELECT returns results.
-- Calling with an UPDATE keyword returns an MCP tool error with helpful message.
-- Query without LIMIT is capped by `max_rows`.
+
+- The package structure exists.
+- Scripts are runnable from the repo root.
+- Paths are stable and documented.
 
 ---
 
-## Milestone M3 — Tool: entity_search (label-based lookup)
+## Milestone 3 — Define the gold evaluation dataset schema
 
 ### Goal
-Enable robust entity discovery without embeddings.
 
-### Tool: `entity_search`
-**Input**
-- `text: string`
-- `limit: int` default 10
-- `lang: string | null` default null
+Create the dataset that drives all benchmark runs taking into account the knowledge graph structure explained in docs/amsterdam_museum_kg_guide.md.
 
-**Output**
-- `results: [{ uri, label, score }]`
+### JSONL schema
+
+Each row should follow this schema:
+
+```json
+{
+  "id": "q-001",
+  "question": "Who created object X?",
+  "reference_answer": "Object X was created by Jane Doe.",
+  "reference_points": [
+    "creator = Jane Doe"
+  ],
+  "expected_abstain": false,
+  "question_type": "single_hop",
+  "difficulty": "easy",
+  "notes": "Accept J. Doe as equivalent.",
+  "supporting_refs": ["uri:...", "chunk:..."]
+}
+```
+
+Trap question rows should still include the same fields, with:
+
+- `reference_answer = "ABSTAIN"`
+- `expected_abstain = true`
+
+### Dataset composition
+
+Start with around **60–80 questions** total:
+
+- single-hop factual questions,
+- multi-hop questions,
+- comparison / aggregation questions,
+- unanswerable trap questions.
+
+### Acceptance criteria
+
+- Dataset schema is documented.
+- At least 10 seed examples exist so the pipeline can be run immediately.
+- Existing trap questions are normalized into the richer schema.
+
+---
+
+## Milestone 4 — Standardize prompts
+
+### Goal
+
+Make all systems answer under the same rules.
+
+### Prompt A — no context
+
+Use for the LLM-only baseline.
+
+```text
+You are answering factual questions.
+Return a short factual answer.
+If you are not sure, answer exactly: ABSTAIN
+Do not invent facts.
+```
+
+### Prompt B — retrieved-context answerer
+
+Use for RAG and any non-agent context-based answer generation.
+
+```text
+You are answering factual questions using only the provided evidence.
+Return a short factual answer.
+If the evidence is insufficient, answer exactly: ABSTAIN
+Do not invent facts.
+Do not use outside knowledge.
+```
+
+### Prompt C — MCP agent
+
+Use for the Claude tool-using MCP runner.
+
+```text
+You are an evaluation agent answering questions about a knowledge graph.
+You may use the provided tools to gather evidence.
+Rules:
+- Use tools only when needed.
+- Prefer the smallest number of tool calls.
+- If the answer cannot be supported, return exactly: ABSTAIN
+- Do not invent facts.
+- Final answer must be short and factual.
+```
+
+### Acceptance criteria
+
+- Prompts live in files, not hardcoded strings only.
+- A shared normalizer maps abstain variants to `ABSTAIN`.
+
+---
+
+## Milestone 5 — Implement the 3 runners
+
+### Goal
+
+Generate raw benchmark outputs for each system in a common format.
+
+### Common raw output schema
+
+Each run should emit JSONL rows like:
+
+```json
+{
+  "question_id": "q-001",
+  "system": "rag_text",
+  "model": "claude-sonnet-4-6",
+  "question": "...",
+  "answer": "...",
+  "normalized_answer": "...",
+  "abstained": false,
+  "latency_ms": 812,
+  "retrieved_contexts": ["..."],
+  "citations": [],
+  "tool_trace": [],
+  "meta": {}
+}
+```
+
+### Runner 1 — `run_no_context.py`
+
+Behavior:
+
+- Load dataset rows.
+- Send only the question and no-context prompt to Claude.
+- Normalize output.
+- Save raw JSONL.
+
+### Runner 2 — `run_rag_text.py`
+
+Behavior:
+
+- Call the existing API `/query` with:
+  - `mode="text"`
+  - `debug=true`
+- Capture:
+  - answer,
+  - abstained,
+  - citations,
+  - retrieved evidence from debug payload when available,
+  - latency.
+- Normalize output.
+- Save raw JSONL.
+
+### Runner 3 — `run_mcp_agent.py`
+
+Behavior:
+
+- Start or connect to the MCP KG server.
+- Discover tool schemas.
+- Run Claude in a tool loop:
+  - send question + MCP prompt,
+  - execute requested tools,
+  - append tool results,
+  - continue until final answer or max iterations.
+- Record tool trace in detail.
+- Normalize output.
+- Save raw JSONL.
+
+### Acceptance criteria
+
+- Each runner can process a 5-question smoke dataset.
+- All runners write the same raw output schema.
+- Failures are logged clearly and do not silently corrupt outputs.
+
+---
+
+## Milestone 6 — Implement the lightweight correctness judge
+
+### Goal
+
+Score whether each model answer is correct or not using a cheap, strict judge.
+
+### Judge model
+
+Use:
+
+- `claude-haiku-4-5-20251001`
+
+### Judge prompt
+
+Create `eval/prompts/judge_correctness_v1.txt`:
+
+```text
+You are grading answers for a factual QA benchmark.
+
+Return JSON only:
+{
+  "verdict": 0,
+  "reason": "",
+  "missing_points": [],
+  "extra_claims": []
+}
+
+Rules:
+- verdict = 1 only if the answer is correct enough.
+- Treat ABSTAIN as correct only when expected_abstain=true.
+- Any unsupported extra factual claim should make verdict = 0.
+- Minor wording differences are acceptable.
+- Judge based on the reference answer and reference_points.
+
+Question: {question}
+Expected abstain: {expected_abstain}
+Reference answer: {reference_answer}
+Reference points: {reference_points}
+Model answer: {model_answer}
+```
+
+### Tasks
+
+- Implement judge script that reads raw outputs and dataset rows.
+- Produce scored JSONL / CSV with:
+  - `binary_correct`
+  - `judge_reason`
+  - `missing_points`
+  - `extra_claims`
+
+### Acceptance criteria
+
+- Judge runs on outputs from all three systems.
+- Invalid judge JSON is retried or surfaced cleanly.
+
+---
+
+## Milestone 7 — Integrate RAGAS metrics
+
+### Goal
+
+Add reusable RAGAS scoring for retrieval-grounded systems.
+
+### Metrics to implement first
+
+For **RAG** and **MCP**:
+
+- `Faithfulness`
+- `ContextPrecision`
+- `ContextRecall`
+
+For **all systems**:
+
+- one custom binary correctness metric wrapper, or run the external judge and merge into the final report.
+
+### Optional later metric
+
+- `AnswerCorrectness` if embeddings are added.
 
 ### Implementation notes
-- Use SPARQL to search `rdfs:label` (and optionally `skos:prefLabel`, `schema:name`) with case-insensitive contains.
-- `score` can be heuristic: exact match > prefix > contains.
+
+- Use the current RAGAS API that matches the installed version.
+- If using RAGAS v0.4+, prefer its experiment-oriented workflow.
+- Keep the implementation minimal and documented.
+- If `AnswerCorrectness` is added, explicitly wire an embedding model instead of assuming Anthropic provides one.
 
 ### Acceptance criteria
-- Searching a known label returns its URI and label.
-- Empty results are handled gracefully.
+
+- RAGAS scoring works on a smoke dataset.
+- Retrieval-based metrics only run when retrieved contexts are available.
+- Missing contexts produce explicit skip reasons, not crashes.
 
 ---
 
-## Milestone M4 — Tool: entity_facts (1-hop facts for citations)
+## Milestone 8 — Judge alignment pass
 
 ### Goal
-Provide evidence packs directly from KG facts.
 
-### Tool: `entity_facts`
-**Input**
-- `uri: string`
-- `limit: int` default 50
-- `include_incoming: bool` default false
+Make the lightweight judge stable enough for thesis use.
 
-**Output**
-- `triples: [{ s, p, o, o_type, o_lang }]`
-- `row_count: int`
+### Tasks
 
-### Implementation notes
-- Query: `<uri> ?p ?o` with LIMIT.
-- If include_incoming: `?s ?p <uri>` (separate query or UNION with cap).
-- Return objects with datatype/lang info when possible.
+- Create a small manually labeled set of around 20–30 examples.
+- Compare judge output vs manual label.
+- Refine the judge prompt once or twice.
+- Freeze prompt as `judge_correctness_v1`.
 
 ### Acceptance criteria
-- Given a URI from `entity_search`, `entity_facts` returns triples.
-- Works if only a few triples exist.
+
+- Judge prompt is no longer changing between main experiment runs.
+- Alignment notes are written to a short markdown file.
 
 ---
 
-## Milestone M5 — Tool: schema_summary (KG introspection)
+## Milestone 9 — Reporting scripts
 
 ### Goal
-Give the model a quick understanding of the KG structure.
 
-### Tool: `schema_summary`
-**Output**
-- `top_classes: [{ class_uri, count }]` (top N)
-- `top_predicates: [{ predicate_uri, count }]` (top N)
-- `example_triples: [{ s, p, o }]` (small sample)
-- `notes: string` (e.g., “labels use rdfs:label”)
+Generate thesis-ready summaries from the scored outputs.
 
-### Implementation notes
-- Use lightweight SPARQL sampling queries (LIMITed).
-- Cache result in-memory for ~5 minutes to reduce load.
+### Required outputs
+
+Produce:
+
+1. **System comparison table**
+   - correctness rate
+   - abstain accuracy
+   - hallucination rate
+   - mean latency
+
+2. **Retrieval diagnostics table** for RAG and MCP
+   - faithfulness
+   - context precision
+   - context recall
+   - tool calls per answer for MCP
+
+3. **Error slices**
+   - single-hop
+   - multi-hop
+   - trap questions
+   - abstain cases
+
+4. **Exportable CSV or markdown tables**
 
 ### Acceptance criteria
-- Tool returns non-empty predicates list on a non-empty KG.
-- Works on empty KG (returns empty arrays, not errors).
+
+- A single command can generate a report from scored outputs.
+- Report files are written under `eval/outputs/reports/`.
 
 ---
 
-## Milestone M6 — MCP prompts: “Iterative KG Query Assistant”
+## Implementation Order
 
-### Goal
-Expose an MCP prompt template that teaches the LLM how to iterate.
+1. Anthropic adapter.
+2. Eval folder structure.
+3. Dataset schema and seed dataset.
+4. Prompt files.
+5. No-context runner.
+6. RAG runner.
+7. MCP runner.
+8. Judge.
+9. RAGAS metrics.
+10. Reports.
 
-### Prompt: `kg_query_assistant`
-Provide an MCP prompt that instructs:
-- Use `schema_summary` first (once) unless already known.
-- Use `entity_search` to resolve ambiguous names to URIs.
-- Use `sparql_query` for structured questions.
-- If results are empty or wrong shape, revise query and try again (max 3 attempts).
-- Always cite URIs/predicates used.
-- If evidence is insufficient, abstain.
-
-Arguments:
-- `question: string`
-- `max_attempts: int` default 3
-
-### Acceptance criteria
-- VS Code can list prompts and insert/use `kg_query_assistant`.
-- The prompt is concise, tool-oriented, and enforces read-only + citations.
+This order ensures you can get usable benchmark data early.
 
 ---
 
-## Milestone M7 — Telemetry for MCP tool calls (separate from /query telemetry)
+## Non-Goals
 
-### Goal
-Log each MCP tool call for evaluation and debugging.
+Do **not** do these unless required later:
 
-### Implementation
-- Add a lightweight log file (JSONL) by default:
-  - `logs/mcp_tool_calls.jsonl`
-- Each record:
-  - timestamp, tool_name
-  - request parameters (redact if needed)
-  - row_count, truncated, latency_ms
-  - errors
-
-Optional:
-- Also write to Postgres as `mcp_runs` table, but JSONL is acceptable for MVP.
-
-### Acceptance criteria
-- Each tool call creates a JSONL record.
-- Errors are recorded with reason.
+- no UI work,
+- no new database services,
+- no major `/query` refactor,
+- no synthetic dataset generation pipeline,
+- no attempt to benchmark free-form Codex/VS Code behavior.
 
 ---
 
-## Milestone M8 — “Answer mode” integration (optional but recommended)
+## Suggested Commands
 
-### Goal
-Add a new `/query` mode that leverages the same iterative workflow OR document a VS Code workflow using MCP.
+Use or adapt existing project conventions.
 
-Options:
-A) Keep MCP for developer workflow only (VS Code / Codex uses MCP tools directly).
-B) Add `/query` mode `kg_tool` that mimics the MCP iterative workflow internally (not via MCP) to make it reproducible for benchmarking.
+Examples:
 
-For thesis benchmarking, B is recommended:
-- it makes the behavior reproducible outside VS Code.
+```bash
+docker compose up --build -d
+curl -s http://localhost:8000/health
+python eval/runners/run_no_context.py --dataset eval/datasets/core_eval_v1.jsonl
+python eval/runners/run_rag_text.py --dataset eval/datasets/core_eval_v1.jsonl
+python eval/runners/run_mcp_agent.py --dataset eval/datasets/core_eval_v1.jsonl
+python eval/scoring/judge_binary.py --raw eval/outputs/raw/
+python eval/scoring/ragas_metrics.py --raw eval/outputs/raw/
+python eval/reports/summarize_results.py --scored eval/outputs/scored/
+```
 
-### Acceptance criteria
-- Documented workflow exists to answer questions by iterative SPARQL tool use.
-- If implementing `/query mode=kg_tool`, it must:
-  - do 1–3 tool-like query attempts
-  - abstain when evidence is insufficient
-  - return citations (URIs/predicates) and debug info when requested
+---
+
+## Expected Final Deliverables
+
+By the end of this implementation, the repository should contain:
+
+- Anthropic provider support,
+- a reusable evaluation dataset schema,
+- prompt files,
+- 3 benchmark runners,
+- a lightweight correctness judge,
+- RAGAS metrics integration,
+- report generation scripts,
+- smoke-test documentation.
+
+---
+
+## First Execution Target
+
+Before building the full benchmark, get this narrow path working end-to-end:
+
+- 5 questions only,
+- all 3 runners,
+- binary judge,
+- one summary table.
+
+Only then expand to the full dataset.
+

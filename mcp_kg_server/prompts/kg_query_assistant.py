@@ -14,13 +14,13 @@ def _format_kg_query_prompt(question: str, max_attempts: int) -> str:
         "Additional runtime instructions:\n"
         "- You are answering a live user question using only read-only MCP tools.\n"
         f"- User question: {question}\n"
-        f"- Retry budget: at most {bounded_attempts} total structured retrieval attempts.\n"
+        f"- Retry budget: at most {bounded_attempts} total structured retrieval attempts ({bounded_attempts} attempts max).\n"
         "- Start with `schema_summary` once per session only if you still need orientation.\n"
         "- Prefer `sparql_query` for precise retrieval; use `entity_search` only to disambiguate names.\n"
         "- Never use SPARQL UPDATE operations.\n"
         "- Keep queries bounded and avoid broad unfiltered scans.\n"
         "- Cite the exact URIs and predicates used in the final answer.\n"
-        "- If evidence is still insufficient after the retry budget, say so clearly."
+        "- If evidence is still insufficient after the retry budget, abstain and say so clearly."
     )
 
 
