@@ -23,7 +23,7 @@ from common import (
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the RAG text baseline through /query.")
+    parser = argparse.ArgumentParser(description="Run the RAG baseline through /query.")
     parser.add_argument(
         "--dataset",
         default="eval/datasets/core_eval_v1.jsonl",
@@ -42,7 +42,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         default="eval/prompts/answer_with_context_v1.txt",
-        help="Prompt file for context-based answering.",
+        help="System prompt file for context-based answering.",
     )
     parser.add_argument(
         "--top-k",
@@ -92,6 +92,7 @@ def main() -> None:
     )
     print(f"[run_rag_text] Prompt: {prompt_path} ({len(prompt_text.splitlines())} lines)")
     print(f"[run_rag_text] API base URL: {args.api_base_url}")
+    print("[run_rag_text] API mode: hybrid")
     print(f"[run_rag_text] Output: {output_path}")
 
     failed = 0
@@ -123,10 +124,11 @@ def main() -> None:
                     endpoint,
                     json={
                         "question": question,
-                        "mode": "text",
+                        "mode": "hybrid",
                         "top_k": args.top_k,
                         "dataset_version": args.dataset_version,
                         "debug": True,
+                        "system_prompt": prompt_text,
                     },
                 )
                 response.raise_for_status()
@@ -153,6 +155,7 @@ def main() -> None:
                     forced_abstained=bool(payload.get("abstained", False)),
                     meta={
                         "prompt_version": prompt_path.name,
+                        "api_mode_requested": "hybrid",
                         "api_mode": payload.get("mode"),
                         "api_top_k": payload.get("top_k"),
                         "api_abstained": payload.get("abstained"),

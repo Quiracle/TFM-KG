@@ -42,6 +42,7 @@ python eval/reports/summarize_results.py --scored eval/outputs/scored
 
 Notes:
 
+- `run_rag_text.py` calls `/query` with `mode="hybrid"` and forwards the selected prompt file as `system_prompt`.
 - Retrieval metrics run only for `rag_text` and `mcp_agent` rows with non-empty `retrieved_contexts`.
 - Rows without retrieval context are kept with explicit `ragas_skip_reason`.
 - If present, binary judge fields are merged from `eval/outputs/scored/binary_judge_scored.jsonl`.

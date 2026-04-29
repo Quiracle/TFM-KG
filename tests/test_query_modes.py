@@ -90,6 +90,24 @@ class _FakeLLMClient:
         return _Result()
 
 
+class _PromptCaptureLLMClient:
+    provider_name = "ollama"
+    model_name = "mistral:7b"
+
+    def __init__(self) -> None:
+        self.last_messages: list[Any] = []
+
+    def generate(self, messages: list[Any], **_: Any) -> Any:
+        self.last_messages = messages
+
+        class _Result:
+            text = "Evidence-based answer from retrieved facts."
+            prompt_tokens = 10
+            completion_tokens = 6
+
+        return _Result()
+
+
 class _FakeFusekiClient:
     def sparql(self, query: str) -> dict[str, Any]:
         if "FILTER(" in query:
@@ -301,4 +319,38 @@ def test_query_kg_mode_debug_includes_triples_and_evidence_pack() -> None:
     assert "evidence_pack" in payload["debug"]
     assert len(payload["debug"]["evidence_pack"]["facts"]) > 0
     assert "kg_queries" in payload["debug"]
+    app.dependency_overrides.clear()
+
+
+def test_query_uses_system_prompt_override_when_provided() -> None:
+    fake_store = _FakeVectorStore()
+    fake_telemetry = _FakeTelemetryClient()
+    fake_embeddings = _FakeEmbeddingModel()
+    fake_llm = _PromptCaptureLLMClient()
+    app.dependency_overrides[get_vector_store] = lambda: fake_store
+    app.dependency_overrides[get_telemetry_client] = lambda: fake_telemetry
+    app.dependency_overrides[get_embedding_model] = lambda: fake_embeddings
+    app.dependency_overrides[get_llm_client] = lambda: fake_llm
+    app.dependency_overrides[get_fuseki_client] = lambda: _FakeFusekiClient()
+    client = TestClient(app)
+
+    custom_prompt = "Use only evidence. If unsure, answer ABSTAIN."
+    response = client.post(
+        "/query",
+        json={
+            "question": "What is France?",
+            "mode": "text",
+            "top_k": 2,
+            "debug": True,
+            "system_prompt": custom_prompt,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["abstained"] is False
+    assert payload["debug"]["system_prompt_overridden"] is True
+    assert len(fake_llm.last_messages) >= 2
+    assert fake_llm.last_messages[0].role == "system"
+    assert fake_llm.last_messages[0].content == custom_prompt
     app.dependency_overrides.clear()

@@ -46,16 +46,29 @@ def _build_evidence_text(evidence_facts: list[str]) -> str:
     return "\n".join(f"- {fact}" for fact in evidence_facts)
 
 
-def _build_evidence_prompt(question: str, evidence_text: str) -> list[LLMMessage]:
+def _default_evidence_system_prompt() -> str:
+    return (
+        "Answer only from the provided evidence facts. "
+        "Do not invent facts. Keep the answer short and factual. "
+        "If evidence is insufficient, answer exactly: "
+        "\"I don't have enough information in the provided sources to answer that.\""
+    )
+
+
+def _build_evidence_prompt(
+    question: str,
+    evidence_text: str,
+    system_prompt: str | None = None,
+) -> list[LLMMessage]:
+    prompt_text = (
+        system_prompt.strip()
+        if isinstance(system_prompt, str) and system_prompt.strip()
+        else _default_evidence_system_prompt()
+    )
     return [
         LLMMessage(
             role="system",
-            content=(
-                "Answer only from the provided evidence facts. "
-                "Do not invent facts. Keep the answer short and factual. "
-                "If evidence is insufficient, answer exactly: "
-                "\"I don't have enough information in the provided sources to answer that.\""
-            ),
+            content=prompt_text,
         ),
         LLMMessage(
             role="user",
@@ -283,7 +296,11 @@ def query(
     if abstained:
         answer = _abstain_answer()
     else:
-        llm_prompt = _build_evidence_prompt(req.question, evidence_text)
+        llm_prompt = _build_evidence_prompt(
+            req.question,
+            evidence_text,
+            system_prompt=req.system_prompt,
+        )
         try:
             llm_result = llm_client.generate(messages=llm_prompt, temperature=0.2, max_output_tokens=300)
         except Exception as exc:
@@ -331,6 +348,7 @@ def query(
                 "dataset_version": dataset_version,
                 "providers": providers,
                 "abstain_reason": abstain_reason,
+                "system_prompt_overridden": bool(req.system_prompt and req.system_prompt.strip()),
             }
         )
         if req.mode == "kg":

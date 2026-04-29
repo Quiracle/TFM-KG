@@ -57,9 +57,10 @@ Notes:
 
 ## 3) Validate connection
 
-1. Reload VS Code window after saving MCP config.
-2. In the MCP tools UI, confirm server `tfmkg-kg` is connected.
-3. Call tool `ping`.
+1. Save `claude_desktop_config.json`.
+2. Fully restart Claude Desktop.
+3. Open a new chat and confirm MCP tools are available.
+4. Call tool `ping` from server `tfmkg-kg`.
 
 Expected response:
 

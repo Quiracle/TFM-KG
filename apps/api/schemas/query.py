@@ -9,6 +9,11 @@ class QueryRequest(BaseModel):
     top_k: int = Field(8, ge=1, le=50, description="How many items to retrieve")
     dataset_version: str = Field("dev", min_length=1, description="Dataset version filter")
     debug: bool = Field(False, description="Include retrieval diagnostics")
+    system_prompt: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Optional system prompt override for answer generation.",
+    )
 
 class Citation(BaseModel):
     source_type: str
