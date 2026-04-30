@@ -63,9 +63,28 @@ def _meaningful_tokens(text: str) -> set[str]:
         "who",
         "why",
         "with",
+        "artwork",
+        "associated",
+        "current",
+        "date",
+        "kg",
+        "label",
+        "linked",
+        "listed",
+        "maker",
+        "number",
+        "object",
+        "proxies",
+        "proxy",
+        "recorded",
+        "title",
+    }
+    accession_numbers = {
+        re.sub(r"\s+", "", match).lower()
+        for match in re.findall(r"\b[A-Za-z]{1,4}\s+\d+(?:\.\d+)?\b", text)
     }
     words = re.findall(r"[A-Za-z0-9_]+", text.lower())
-    return {word for word in words if len(word) >= 3 and word not in stopwords}
+    return accession_numbers | {word for word in words if len(word) >= 3 and word not in stopwords}
 
 
 def should_abstain(

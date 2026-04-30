@@ -70,10 +70,14 @@ class _FakeEmbeddingModel:
     provider_name = "ollama"
     model_name = "embeddinggemma"
 
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return [self.embed_query(text) for text in texts]
 
     def embed_query(self, text: str) -> list[float]:
+        self.queries.append(text)
         return [0.1] + [0.0] * 767
 
 
@@ -198,6 +202,9 @@ def test_query_table_and_hybrid_modes_change_filters() -> None:
     assert hybrid_response.status_code == 200
     assert fake_store.calls[0]["filters"] == {"source_type": "table_row", "dataset_version": "dev"}
     assert fake_store.calls[1]["filters"] == {"source_type": "kg_text", "dataset_version": "dev"}
+    assert fake_embeddings.queries[0] == "table q"
+    assert "Hybrid KG retrieval hints" in fake_embeddings.queries[1]
+    assert "artwork proxy" in fake_embeddings.queries[1]
     assert len(fake_telemetry.calls) == 2
     app.dependency_overrides.clear()
 

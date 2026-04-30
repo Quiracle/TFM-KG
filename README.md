@@ -44,4 +44,9 @@ docker compose exec api python src/tfmkg/scripts/index_kg.py --limit 200 --tripl
 docker compose exec postgres psql -U tfmkg -d tfmkg -c "select source_type, count(*) from chunks group by source_type;"
 ```
 
-The script builds deterministic entity-card text (`label` + up to 50 triples), embeds in batches (Ollama `embeddinggemma` by default), and upserts by `chunk_id`.
+The script builds deterministic KG-aware entity cards for hybrid retrieval. Artwork proxy cards resolve maker blank nodes, thesaurus labels, dimensions, locations, acquisition fields, and bounded related-artwork summaries; person cards include maker-work counts and small sample work lists. Dense or infrastructural relations are kept out of the card unless they support retrieval, then the cards are embedded in batches (Ollama `embeddinggemma` by default) and upserted by `chunk_id`.
+
+If a long indexing run is interrupted after some `kg_text` chunks have already been written, resume without recomputing those rows:
+```bash
+docker compose exec api python src/tfmkg/scripts/index_kg.py --limit 0 --batch-size 16 --dataset-version dev --skip-existing --embedding-retries 5
+```

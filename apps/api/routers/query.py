@@ -38,6 +38,31 @@ def _mode_to_source_type(mode: str) -> str | None:
     return None
 
 
+def _build_embedding_query_text(question: str, mode: str) -> str:
+    if mode != "hybrid":
+        return question
+
+    normalized = question.casefold()
+    hints = ["Amsterdam Museum KG", "artwork proxy", "title", "object number"]
+
+    if "maker" in normalized or "who is listed" in normalized or "created" in normalized:
+        hints.append("maker creator artist person")
+    if "relatedobjectreference" in normalized or "linked from" in normalized or "related artwork" in normalized:
+        hints.append("relatedObjectReference related artwork title count")
+    if "width" in normalized or "height" in normalized or "dimension" in normalized:
+        hints.append("recorded dimensions width height value unit")
+    if "acquisition" in normalized:
+        hints.append("acquisition method acquisition date")
+    if "location" in normalized or "locat" in normalized:
+        hints.append("location label current location")
+    if "produced" in normalized or "production" in normalized or "earlier" in normalized:
+        hints.append("production date start production year")
+    if "how many" in normalized or "count" in normalized or "distinct" in normalized:
+        hints.append("distinct count number of linked proxies")
+
+    return f"{question}\nHybrid KG retrieval hints: {'; '.join(hints)}"
+
+
 def _abstain_answer() -> str:
     return "I don't have enough information in the provided sources to answer that."
 
@@ -262,8 +287,9 @@ def query(
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"KG retrieval failed: {exc}") from None
     else:
+        embedding_query_text = _build_embedding_query_text(req.question, req.mode)
         try:
-            query_embedding = embedding_model.embed_query(req.question)
+            query_embedding = embedding_model.embed_query(embedding_query_text)
         except Exception as exc:
             raise HTTPException(status_code=503, detail=f"Embedding provider error: {exc}") from None
 
@@ -351,6 +377,8 @@ def query(
                 "system_prompt_overridden": bool(req.system_prompt and req.system_prompt.strip()),
             }
         )
+        if req.mode == "hybrid":
+            debug_payload["embedding_query_text"] = _build_embedding_query_text(req.question, req.mode)
         if req.mode == "kg":
             debug_payload["triples"] = [item.get("triple", {}) for item in retrieved]
             debug_payload["kg_queries"] = kg_debug or {}

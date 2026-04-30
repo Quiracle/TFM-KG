@@ -74,3 +74,23 @@ def test_should_not_abstain_when_evidence_is_sufficient_and_overlaps() -> None:
     )
     assert abstain is False
     assert reason is None
+
+
+def test_should_not_abstain_when_accession_number_overlaps() -> None:
+    abstain, reason = should_abstain(
+        question="Which maker is associated with object number A 54?",
+        retrieval_hits=[{"chunk_id": "kg:1"}],
+        evidence_text="Object number: A 54\nMaker: Sallieth, Mathias de",
+    )
+    assert abstain is False
+    assert reason is None
+
+
+def test_should_abstain_when_only_generic_card_fields_overlap() -> None:
+    abstain, reason = should_abstain(
+        question="What is the patent number for the Quantum Crop Irrigator X9?",
+        retrieval_hits=[{"chunk_id": "kg:1"}],
+        evidence_text="Object number: A 54\nProduction date start: 1780\nTitle: Monument voor Amsterdam",
+    )
+    assert abstain is True
+    assert reason == "no_question_evidence_overlap"
