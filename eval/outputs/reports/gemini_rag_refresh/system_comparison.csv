@@ -1,0 +1,2 @@
+system,total_rows,scored_rows,correctness_rate,abstain_accuracy,hallucination_rate,mean_latency_ms
+rag_text,72,72,0.3611111111111111,1.0,0.013888888888888888,1798.25

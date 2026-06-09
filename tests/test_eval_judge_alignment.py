@@ -77,12 +77,6 @@ def test_judge_alignment_compares_manual_labels_and_writes_report(
     )
     prompt_path.write_text("Question: {question}\nModel answer: {model_answer}\n", encoding="utf-8")
 
-    class _FakeJudgeClient:
-        def __init__(self, *, api_key: str, model: str, timeout_s: int):
-            self.api_key = api_key
-            self.model = model
-            self.timeout_s = timeout_s
-
     decisions = iter(
         [
             JudgeDecision(binary_correct=1, judge_reason="Correct.", missing_points=[], extra_claims=[], attempts=1),
@@ -101,10 +95,14 @@ def test_judge_alignment_compares_manual_labels_and_writes_report(
     def _fake_judge(**kwargs):
         return next(decisions)
 
-    monkeypatch.setattr(judge_alignment, "AnthropicMessagesClient", _FakeJudgeClient)
+    monkeypatch.setattr(judge_alignment, "_build_judge_client", lambda provider, model: object())
     monkeypatch.setattr(judge_alignment, "_judge_answer_with_retry", _fake_judge)
-    original_key = judge_alignment.settings.anthropic_api_key
-    judge_alignment.settings.anthropic_api_key = "test-key"
+    original = {
+        "judge_provider": judge_alignment.settings.judge_provider,
+        "judge_model": judge_alignment.settings.judge_model,
+    }
+    judge_alignment.settings.judge_provider = "gemini"
+    judge_alignment.settings.judge_model = "gemini-test-model"
     monkeypatch.setattr(
         sys,
         "argv",
@@ -126,7 +124,8 @@ def test_judge_alignment_compares_manual_labels_and_writes_report(
     try:
         judge_alignment.main()
     finally:
-        judge_alignment.settings.anthropic_api_key = original_key
+        judge_alignment.settings.judge_provider = original["judge_provider"]
+        judge_alignment.settings.judge_model = original["judge_model"]
 
     rows = _read_jsonl(output_jsonl)
     assert len(rows) == 3

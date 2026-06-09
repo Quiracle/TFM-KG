@@ -158,6 +158,7 @@ def test_ragas_metrics_scores_only_eligible_retrieval_rows(
     def _fake_evaluate_with_ragas(
         *,
         ragas_inputs: list[dict],
+        provider: str,
         model: str,
         temperature: float,
         max_output_tokens: int,

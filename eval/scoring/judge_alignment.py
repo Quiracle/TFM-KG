@@ -20,8 +20,7 @@ from eval.runners.common import (
     load_text_file,
     resolve_repo_path,
 )
-from eval.scoring.judge_binary import DEFAULT_JUDGE_MODEL, _judge_answer_with_retry, _render_prompt
-from src.tfmkg.adapters.llm.anthropic_messages import AnthropicMessagesClient
+from eval.scoring.judge_binary import _build_judge_client, _judge_answer_with_retry, _render_prompt
 from src.tfmkg.core.config import settings
 
 CSV_FIELDS = (
@@ -70,9 +69,14 @@ def _parse_args() -> argparse.Namespace:
         help="Path to write alignment summary markdown report.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        help="Judge provider override. Defaults to JUDGE_PROVIDER from .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=DEFAULT_JUDGE_MODEL,
-        help="Anthropic model used as judge.",
+        default=None,
+        help="Judge model override. Defaults to JUDGE_MODEL from .env.",
     )
     parser.add_argument(
         "--temperature",
@@ -187,8 +191,11 @@ def main() -> None:
         raise SystemExit(f"Alignment dataset not found: {alignment_path}")
     if not prompt_path.exists():
         raise SystemExit(f"Prompt not found: {prompt_path}")
-    if not settings.anthropic_api_key:
-        raise SystemExit("ANTHROPIC_API_KEY is required for judge alignment.")
+
+    judge_provider = str(args.provider or settings.judge_provider).strip().lower()
+    judge_model = str(args.model or settings.judge_model).strip()
+    if not judge_model:
+        raise SystemExit("JUDGE_MODEL is required.")
 
     alignment_rows = _validate_alignment_rows(load_jsonl(alignment_path))
     prompt_template = load_text_file(prompt_path)
@@ -202,11 +209,7 @@ def main() -> None:
     ensure_output_dirs()
     init_jsonl_output(output_jsonl_path)
 
-    judge_client = AnthropicMessagesClient(
-        api_key=settings.anthropic_api_key,
-        model=args.model,
-        timeout_s=settings.ollama_timeout_s,
-    )
+    judge_client = _build_judge_client(judge_provider, judge_model)
 
     results: list[dict[str, Any]] = []
     agreement_count = 0
@@ -275,12 +278,14 @@ def main() -> None:
         "false_negatives": false_negatives,
         "judge_errors": judge_errors,
         "prompt_path": str(prompt_path),
-        "model": args.model,
+        "model": judge_model,
     }
     mismatches = [row for row in results if row.get("error_class") in {"false_positive", "false_negative"}]
     _write_alignment_report(report_path, summary=summary, mismatches=mismatches)
 
     print(f"[judge_alignment] Rows={len(results)} scored={scored_rows} agreement={agreement_count}")
+    print(f"[judge_alignment] Judge provider: {judge_provider}")
+    print(f"[judge_alignment] Judge model: {judge_model}")
     print(f"[judge_alignment] JSONL: {output_jsonl_path}")
     print(f"[judge_alignment] CSV: {output_csv_path}")
     print(f"[judge_alignment] Report: {report_path}")

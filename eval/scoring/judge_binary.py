@@ -23,11 +23,10 @@ from eval.runners.common import (
     to_jsonable,
     truncate_text,
 )
-from src.tfmkg.adapters.llm.anthropic_messages import AnthropicMessagesClient
+from src.tfmkg.adapters.llm import AnthropicMessagesClient, GeminiGenerateAdapter, OllamaChatClient, OpenAIResponsesClient
 from src.tfmkg.core.config import settings
-from src.tfmkg.domain.ports.llm import LLMMessage
+from src.tfmkg.domain.ports.llm import LLMClientPort, LLMMessage
 
-DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_SYSTEM_PROMPT = "You are a strict factual QA grader. Return JSON only."
 
 CSV_FIELDS = (
@@ -157,6 +156,42 @@ def _build_dataset_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]
     return index
 
 
+def _build_judge_client(provider: str, model: str) -> LLMClientPort:
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise SystemExit("OPENAI_API_KEY is required when JUDGE_PROVIDER=openai")
+        return OpenAIResponsesClient(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise SystemExit("ANTHROPIC_API_KEY is required when JUDGE_PROVIDER=anthropic")
+        return AnthropicMessagesClient(
+            api_key=settings.anthropic_api_key,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            raise SystemExit("GEMINI_API_KEY is required when JUDGE_PROVIDER=gemini")
+        return GeminiGenerateAdapter(
+            api_key=settings.gemini_api_key,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "ollama":
+        return OllamaChatClient(
+            base_url=settings.ollama_base_url,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+            stream=settings.ollama_stream,
+        )
+    raise SystemExit(f"Unsupported JUDGE_PROVIDER={provider!r}. Use openai, anthropic, gemini, or ollama.")
+
+
 def _build_scored_row(
     *,
     raw_row: dict[str, Any],
@@ -215,7 +250,7 @@ def _build_scored_row(
 
 def _judge_answer_with_retry(
     *,
-    client: AnthropicMessagesClient,
+    client: LLMClientPort,
     prompt: str,
     temperature: float,
     max_output_tokens: int,
@@ -321,9 +356,14 @@ def _parse_args() -> argparse.Namespace:
         help="Path to write scored CSV output.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        help="Judge provider override. Defaults to JUDGE_PROVIDER from .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=DEFAULT_JUDGE_MODEL,
-        help="Anthropic model used as judge.",
+        default=None,
+        help="Judge model override. Defaults to JUDGE_MODEL from .env.",
     )
     parser.add_argument(
         "--temperature",
@@ -362,8 +402,11 @@ def main() -> None:
         raise SystemExit(f"Dataset not found: {dataset_path}")
     if not prompt_path.exists():
         raise SystemExit(f"Prompt not found: {prompt_path}")
-    if not settings.anthropic_api_key:
-        raise SystemExit("ANTHROPIC_API_KEY is required for judge_binary.")
+
+    judge_provider = str(args.provider or settings.judge_provider).strip().lower()
+    judge_model = str(args.model or settings.judge_model).strip()
+    if not judge_model:
+        raise SystemExit("JUDGE_MODEL is required.")
 
     raw_files = _discover_raw_files(raw_path)
     dataset_rows = load_jsonl(dataset_path)
@@ -374,11 +417,7 @@ def main() -> None:
     init_jsonl_output(output_jsonl_path)
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
-    judge_client = AnthropicMessagesClient(
-        api_key=settings.anthropic_api_key,
-        model=args.model,
-        timeout_s=settings.ollama_timeout_s,
-    )
+    judge_client = _build_judge_client(judge_provider, judge_model)
 
     scored_rows: list[dict[str, Any]] = []
     total_rows = 0
@@ -388,7 +427,8 @@ def main() -> None:
     print(f"[judge_binary] Raw inputs: {[str(path) for path in raw_files]}")
     print(f"[judge_binary] Dataset rows: {len(dataset_rows)} from {dataset_path}")
     print(f"[judge_binary] Prompt: {prompt_path}")
-    print(f"[judge_binary] Judge model: {args.model}")
+    print(f"[judge_binary] Judge provider: {judge_provider}")
+    print(f"[judge_binary] Judge model: {judge_model}")
 
     for raw_file in raw_files:
         raw_rows = load_jsonl(raw_file)
@@ -427,7 +467,7 @@ def main() -> None:
                 reference_row=reference_row,
                 raw_source_file=raw_file.name,
                 decision=decision,
-                judge_model=args.model,
+                judge_model=judge_model,
             )
             scored_rows.append(scored_row)
             append_jsonl_row(output_jsonl_path, scored_row)

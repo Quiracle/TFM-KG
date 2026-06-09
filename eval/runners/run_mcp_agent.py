@@ -6,6 +6,8 @@ import json
 import time
 from typing import Any
 
+import httpx
+
 from common import (
     ABSTAIN,
     append_jsonl_row,
@@ -25,6 +27,23 @@ from common import (
 )
 from mcp_kg_server.server import create_server
 from src.tfmkg.core.config import settings
+
+try:
+    from google import genai
+    from google.genai import errors as gemini_errors
+    from google.genai import types as gemini_types
+except ImportError:
+    genai = None
+    gemini_errors = None
+    gemini_types = None
+
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "anthropic":
+        return settings.anthropic_llm_model
+    if provider == "gemini":
+        return settings.gemini_llm_model
+    raise SystemExit("run_mcp_agent supports LLM_PROVIDER=anthropic or LLM_PROVIDER=gemini.")
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -159,8 +178,245 @@ def _tool_result_contexts(tool_name: str, structured_result: Any) -> list[str]:
     return contexts
 
 
+def _clean_gemini_schema(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_clean_gemini_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    if "anyOf" in value:
+        non_null = [
+            item for item in value["anyOf"]
+            if not (isinstance(item, dict) and item.get("type") == "null")
+        ]
+        if len(non_null) == 1:
+            return _clean_gemini_schema(non_null[0])
+
+    cleaned: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in {"title", "default"}:
+            continue
+        cleaned[key] = _clean_gemini_schema(item)
+    return cleaned
+
+
+def _build_gemini_tool(tools: list[Any]) -> Any:
+    if gemini_types is None:
+        raise RuntimeError("google-genai is required when LLM_PROVIDER=gemini.")
+
+    declarations = []
+    for tool in tools:
+        schema = _clean_gemini_schema(tool.inputSchema or {"type": "object", "properties": {}})
+        declarations.append(
+            gemini_types.FunctionDeclaration(
+                name=tool.name,
+                description=tool.description or "",
+                parameters_json_schema=schema,
+            )
+        )
+    return gemini_types.Tool(function_declarations=declarations)
+
+
+def _create_gemini_client() -> Any:
+    if genai is None or gemini_types is None:
+        raise RuntimeError("google-genai is required when LLM_PROVIDER=gemini.")
+    if not settings.gemini_api_key:
+        raise RuntimeError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini.")
+
+    retry_options = gemini_types.HttpRetryOptions(attempts=1)
+    return genai.Client(
+        api_key=settings.gemini_api_key,
+        http_options=gemini_types.HttpOptions(
+            timeout=settings.ollama_timeout_s * 1000,
+            retry_options=retry_options,
+        ),
+    )
+
+
+def _create_gemini_content_with_retry(
+    *,
+    client: Any,
+    model: str,
+    contents: list[Any],
+    config: Any,
+) -> Any:
+    api_errors = () if gemini_errors is None else (gemini_errors.APIError,)
+    retries = 3
+    for attempt in range(1, retries + 1):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except api_errors + (httpx.TimeoutException, httpx.NetworkError) as exc:
+            is_last = attempt == retries
+            status_code = getattr(exc, "code", None)
+            retryable = isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+            retryable = retryable or status_code is None or status_code == 429 or status_code >= 500
+            if is_last or not retryable:
+                raise RuntimeError(f"Gemini MCP agent request failed: {exc}") from None
+            time.sleep(0.3 * attempt)
+    raise RuntimeError("Gemini MCP agent request failed after retries.")
+
+
+def _gemini_response_content(response: Any) -> Any | None:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+    return getattr(candidates[0], "content", None)
+
+
+def _extract_gemini_text_and_function_calls(response: Any) -> tuple[str, list[Any]]:
+    content = _gemini_response_content(response)
+    text_parts: list[str] = []
+    for part in getattr(content, "parts", None) or []:
+        text = getattr(part, "text", None)
+        if isinstance(text, str) and text.strip():
+            text_parts.append(text.strip())
+    function_calls = getattr(response, "function_calls", None) or []
+    return " ".join(text_parts).strip(), list(function_calls)
+
+
+def _gemini_finish_reason(response: Any) -> str | None:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return None
+    finish_reason = getattr(candidates[0], "finish_reason", None)
+    return None if finish_reason is None else str(finish_reason)
+
+
+def _run_gemini_mcp_answer(
+    *,
+    client: Any,
+    model: str,
+    prompt_text: str,
+    gemini_tool: Any,
+    mcp_server: Any,
+    args: argparse.Namespace,
+    question_id: str,
+    question: str,
+    started: float,
+    meta: dict[str, Any],
+) -> dict[str, Any]:
+    if gemini_types is None:
+        raise RuntimeError("google-genai is required when LLM_PROVIDER=gemini.")
+
+    contents = [
+        gemini_types.Content(
+            role="user",
+            parts=[gemini_types.Part(text=question)],
+        )
+    ]
+    config = gemini_types.GenerateContentConfig(
+        system_instruction=prompt_text,
+        tools=[gemini_tool],
+        tool_config=gemini_types.ToolConfig(
+            function_calling_config=gemini_types.FunctionCallingConfig(mode="AUTO")
+        ),
+        automatic_function_calling=gemini_types.AutomaticFunctionCallingConfig(disable=True),
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+    )
+
+    tool_trace: list[dict[str, Any]] = []
+    retrieved_contexts: list[str] = []
+    final_answer = ABSTAIN
+
+    for iteration in range(1, args.max_iterations + 1):
+        if args.inter_request_delay_s > 0:
+            time.sleep(args.inter_request_delay_s)
+
+        response = _create_gemini_content_with_retry(
+            client=client,
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        response_content = _gemini_response_content(response)
+        if response_content is not None:
+            contents.append(response_content)
+
+        text_answer, function_calls = _extract_gemini_text_and_function_calls(response)
+        if not function_calls:
+            final_answer = text_answer or ABSTAIN
+            meta["stop_reason"] = _gemini_finish_reason(response)
+            break
+
+        if len(function_calls) > args.max_tool_calls_per_turn:
+            meta.setdefault("tool_calls_truncated", 0)
+            meta["tool_calls_truncated"] += len(function_calls) - args.max_tool_calls_per_turn
+
+        response_parts: list[Any] = []
+        for function_call in function_calls[: args.max_tool_calls_per_turn]:
+            tool_name = str(getattr(function_call, "name", "") or "")
+            raw_args = getattr(function_call, "args", {}) or {}
+            tool_input = dict(raw_args) if isinstance(raw_args, dict) else {}
+            tool_use_id = str(getattr(function_call, "id", "") or f"{iteration}:{len(tool_trace) + 1}")
+
+            tool_started = time.perf_counter()
+            try:
+                raw_result = asyncio.run(mcp_server.call_tool(tool_name, tool_input))
+                structured_result = extract_structured_tool_result(raw_result)
+                serialized_result = to_jsonable(structured_result)
+                response_payload = {"output": serialized_result}
+                tool_error = None
+                success = True
+            except Exception as exc:  # noqa: BLE001
+                serialized_result = {
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                }
+                response_payload = serialized_result
+                tool_error = str(exc)
+                success = False
+
+            tool_latency_ms = int((time.perf_counter() - tool_started) * 1000)
+            tool_trace.append(
+                {
+                    "iteration": iteration,
+                    "tool_name": tool_name,
+                    "tool_use_id": tool_use_id,
+                    "input": to_jsonable(tool_input),
+                    "success": success,
+                    "error": tool_error,
+                    "latency_ms": tool_latency_ms,
+                    "result": serialized_result,
+                }
+            )
+            retrieved_contexts.extend(_tool_result_contexts(tool_name, serialized_result))
+
+            response_kwargs: dict[str, Any] = {"name": tool_name, "response": response_payload}
+            if getattr(function_call, "id", None):
+                response_kwargs["id"] = getattr(function_call, "id")
+            response_parts.append(
+                gemini_types.Part(
+                    function_response=gemini_types.FunctionResponse(**response_kwargs)
+                )
+            )
+
+        contents.append(gemini_types.Content(role="user", parts=response_parts))
+    else:
+        meta["stop_reason"] = "max_iterations_exhausted"
+        final_answer = ABSTAIN
+
+    return build_raw_row(
+        question_id=question_id,
+        system="mcp_agent",
+        model=model,
+        question=question,
+        answer=final_answer or ABSTAIN,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        retrieved_contexts=retrieved_contexts[:50],
+        citations=[],
+        tool_trace=tool_trace,
+        meta={
+            **meta,
+            "tool_calls": len(tool_trace),
+        },
+    )
+
+
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run MCP agent evaluation with Claude tool use.")
+    parser = argparse.ArgumentParser(description="Run MCP agent evaluation with tool use.")
     parser.add_argument(
         "--dataset",
         default="eval/datasets/core_eval_v1.jsonl",
@@ -189,9 +445,14 @@ def _parse_args() -> argparse.Namespace:
         help="Prompt file for MCP agent answering.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        help="LLM provider override. Defaults to LLM_PROVIDER from .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=settings.anthropic_llm_model,
-        help="Anthropic model for MCP agent answering.",
+        default=None,
+        help="LLM model override. Defaults to the configured model for the selected provider.",
     )
     parser.add_argument(
         "--temperature",
@@ -266,7 +527,8 @@ def main() -> None:
     prompt_text = load_text_file(prompt_path)
     init_jsonl_output(output_path)
 
-    model = args.model
+    provider = str(args.provider or settings.llm_provider).strip().lower()
+    model = str(args.model or _default_model_for_provider(provider)).strip()
     mcp_server = create_server()
     tools = asyncio.run(mcp_server.list_tools())
     anthropic_tools: list[dict[str, Any]] = []
@@ -278,19 +540,26 @@ def main() -> None:
                 "input_schema": tool.inputSchema or {"type": "object", "properties": {}},
             }
         )
+    gemini_tool = _build_gemini_tool(tools) if provider == "gemini" else None
 
     anthropic_client: Any = None
+    gemini_client: Any = None
     client_error: Exception | None = None
     try:
-        from anthropic import Anthropic
+        if provider == "anthropic":
+            from anthropic import Anthropic
 
-        if not settings.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for run_mcp_agent.")
-        anthropic_client = Anthropic(
-            api_key=settings.anthropic_api_key,
-            timeout=settings.ollama_timeout_s,
-            max_retries=0,
-        )
+            if not settings.anthropic_api_key:
+                raise RuntimeError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic.")
+            anthropic_client = Anthropic(
+                api_key=settings.anthropic_api_key,
+                timeout=settings.ollama_timeout_s,
+                max_retries=0,
+            )
+        elif provider == "gemini":
+            gemini_client = _create_gemini_client()
+        else:
+            raise RuntimeError("run_mcp_agent supports LLM_PROVIDER=anthropic or LLM_PROVIDER=gemini.")
     except Exception as exc:  # noqa: BLE001
         client_error = exc
 
@@ -299,6 +568,8 @@ def main() -> None:
         f"Loaded {len(rows)} rows from {dataset_path}."
     )
     print(f"[run_mcp_agent] Prompt: {prompt_path}")
+    print(f"[run_mcp_agent] Provider: {provider}")
+    print(f"[run_mcp_agent] Model: {model}")
     print(
         f"[run_mcp_agent] Discovered tools={len(anthropic_tools)} "
         f"names={[tool['name'] for tool in anthropic_tools]}"
@@ -335,13 +606,14 @@ def main() -> None:
             "max_iterations": args.max_iterations,
             "max_tool_calls_per_turn": args.max_tool_calls_per_turn,
             "tool_schemas": [tool["name"] for tool in anthropic_tools],
+            "llm_provider": provider,
             "rate_limit_retries_max": args.rate_limit_retries,
             "rate_limit_backoff_s": args.rate_limit_backoff_s,
             "rate_limit_max_backoff_s": args.rate_limit_max_backoff_s,
             "inter_request_delay_s": args.inter_request_delay_s,
         }
 
-        if anthropic_client is None:
+        if (provider == "anthropic" and anthropic_client is None) or (provider == "gemini" and gemini_client is None):
             failed += 1
             assert client_error is not None
             log_runner_error("mcp_agent", qid, client_error)
@@ -361,109 +633,125 @@ def main() -> None:
 
         messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
         try:
-            for iteration in range(1, args.max_iterations + 1):
-                if args.inter_request_delay_s > 0:
-                    time.sleep(args.inter_request_delay_s)
-
-                response = _create_anthropic_message_with_retry(
-                    client=anthropic_client,
-                    request={
-                        "model": model,
-                        "system": prompt_text,
-                        "messages": messages,
-                        "tools": anthropic_tools,
-                        "temperature": args.temperature,
-                        "max_tokens": args.max_output_tokens,
-                    },
+            if provider == "gemini":
+                assert gemini_client is not None
+                assert gemini_tool is not None
+                mcp_row = _run_gemini_mcp_answer(
+                    client=gemini_client,
+                    model=model,
+                    prompt_text=prompt_text,
+                    gemini_tool=gemini_tool,
+                    mcp_server=mcp_server,
+                    args=args,
                     question_id=qid,
-                    iteration=iteration,
-                    max_retries=args.rate_limit_retries,
-                    base_backoff_s=args.rate_limit_backoff_s,
-                    max_backoff_s=args.rate_limit_max_backoff_s,
+                    question=question,
+                    started=started,
                     meta=meta,
                 )
-
-                assistant_content = [_anthropic_block_to_dict(block) for block in response.content]
-                text_answer, tool_uses = _extract_text_and_tool_uses(response.content)
-                messages.append({"role": "assistant", "content": assistant_content})
-
-                if not tool_uses:
-                    final_answer = text_answer or ABSTAIN
-                    meta["stop_reason"] = getattr(response, "stop_reason", None)
-                    break
-
-                if len(tool_uses) > args.max_tool_calls_per_turn:
-                    meta.setdefault("tool_calls_truncated", 0)
-                    meta["tool_calls_truncated"] += len(tool_uses) - args.max_tool_calls_per_turn
-                selected_tool_uses = tool_uses[: args.max_tool_calls_per_turn]
-
-                tool_results_blocks: list[dict[str, Any]] = []
-                for tool_call in selected_tool_uses:
-                    tool_name = str(tool_call.get("name", ""))
-                    tool_input = tool_call.get("input", {})
-                    if not isinstance(tool_input, dict):
-                        tool_input = {}
-                    tool_use_id = str(tool_call.get("id", ""))
-
-                    tool_started = time.perf_counter()
-                    try:
-                        raw_result = asyncio.run(mcp_server.call_tool(tool_name, tool_input))
-                        structured_result = extract_structured_tool_result(raw_result)
-                        serialized_result = to_jsonable(structured_result)
-                        tool_error = None
-                        success = True
-                    except Exception as exc:  # noqa: BLE001
-                        serialized_result = {
-                            "error": {
-                                "type": type(exc).__name__,
-                                "message": str(exc),
-                            }
-                        }
-                        tool_error = str(exc)
-                        success = False
-
-                    tool_latency_ms = int((time.perf_counter() - tool_started) * 1000)
-                    tool_trace.append(
-                        {
-                            "iteration": iteration,
-                            "tool_name": tool_name,
-                            "tool_use_id": tool_use_id,
-                            "input": to_jsonable(tool_input),
-                            "success": success,
-                            "error": tool_error,
-                            "latency_ms": tool_latency_ms,
-                            "result": serialized_result,
-                        }
-                    )
-                    retrieved_contexts.extend(_tool_result_contexts(tool_name, serialized_result))
-                    tool_results_blocks.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": json.dumps(serialized_result, ensure_ascii=True),
-                        }
-                    )
-
-                messages.append({"role": "user", "content": tool_results_blocks})
             else:
-                meta["stop_reason"] = "max_iterations_exhausted"
-                final_answer = ABSTAIN
+                for iteration in range(1, args.max_iterations + 1):
+                    if args.inter_request_delay_s > 0:
+                        time.sleep(args.inter_request_delay_s)
 
-            mcp_row = build_raw_row(
-                question_id=qid,
-                system="mcp_agent",
-                model=model,
-                question=question,
-                answer=final_answer or ABSTAIN,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                retrieved_contexts=retrieved_contexts[:50],
-                citations=[],
-                tool_trace=tool_trace,
-                meta={
-                    **meta,
-                    "tool_calls": len(tool_trace),
-                },
-            )
+                    response = _create_anthropic_message_with_retry(
+                        client=anthropic_client,
+                        request={
+                            "model": model,
+                            "system": prompt_text,
+                            "messages": messages,
+                            "tools": anthropic_tools,
+                            "temperature": args.temperature,
+                            "max_tokens": args.max_output_tokens,
+                        },
+                        question_id=qid,
+                        iteration=iteration,
+                        max_retries=args.rate_limit_retries,
+                        base_backoff_s=args.rate_limit_backoff_s,
+                        max_backoff_s=args.rate_limit_max_backoff_s,
+                        meta=meta,
+                    )
+
+                    assistant_content = [_anthropic_block_to_dict(block) for block in response.content]
+                    text_answer, tool_uses = _extract_text_and_tool_uses(response.content)
+                    messages.append({"role": "assistant", "content": assistant_content})
+
+                    if not tool_uses:
+                        final_answer = text_answer or ABSTAIN
+                        meta["stop_reason"] = getattr(response, "stop_reason", None)
+                        break
+
+                    if len(tool_uses) > args.max_tool_calls_per_turn:
+                        meta.setdefault("tool_calls_truncated", 0)
+                        meta["tool_calls_truncated"] += len(tool_uses) - args.max_tool_calls_per_turn
+                    selected_tool_uses = tool_uses[: args.max_tool_calls_per_turn]
+
+                    tool_results_blocks: list[dict[str, Any]] = []
+                    for tool_call in selected_tool_uses:
+                        tool_name = str(tool_call.get("name", ""))
+                        tool_input = tool_call.get("input", {})
+                        if not isinstance(tool_input, dict):
+                            tool_input = {}
+                        tool_use_id = str(tool_call.get("id", ""))
+
+                        tool_started = time.perf_counter()
+                        try:
+                            raw_result = asyncio.run(mcp_server.call_tool(tool_name, tool_input))
+                            structured_result = extract_structured_tool_result(raw_result)
+                            serialized_result = to_jsonable(structured_result)
+                            tool_error = None
+                            success = True
+                        except Exception as exc:  # noqa: BLE001
+                            serialized_result = {
+                                "error": {
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                }
+                            }
+                            tool_error = str(exc)
+                            success = False
+
+                        tool_latency_ms = int((time.perf_counter() - tool_started) * 1000)
+                        tool_trace.append(
+                            {
+                                "iteration": iteration,
+                                "tool_name": tool_name,
+                                "tool_use_id": tool_use_id,
+                                "input": to_jsonable(tool_input),
+                                "success": success,
+                                "error": tool_error,
+                                "latency_ms": tool_latency_ms,
+                                "result": serialized_result,
+                            }
+                        )
+                        retrieved_contexts.extend(_tool_result_contexts(tool_name, serialized_result))
+                        tool_results_blocks.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": tool_use_id,
+                                "content": json.dumps(serialized_result, ensure_ascii=True),
+                            }
+                        )
+
+                    messages.append({"role": "user", "content": tool_results_blocks})
+                else:
+                    meta["stop_reason"] = "max_iterations_exhausted"
+                    final_answer = ABSTAIN
+
+                mcp_row = build_raw_row(
+                    question_id=qid,
+                    system="mcp_agent",
+                    model=model,
+                    question=question,
+                    answer=final_answer or ABSTAIN,
+                    latency_ms=int((time.perf_counter() - started) * 1000),
+                    retrieved_contexts=retrieved_contexts[:50],
+                    citations=[],
+                    tool_trace=tool_trace,
+                    meta={
+                        **meta,
+                        "tool_calls": len(tool_trace),
+                    },
+                )
         except Exception as exc:  # noqa: BLE001
             failed += 1
             log_runner_error("mcp_agent", qid, exc)

@@ -1,0 +1,3 @@
+system,rows_with_context,rows_with_ragas_scores,faithfulness,context_precision,context_recall,tool_calls_per_answer
+rag_text,72,72,1.0,0.29722222219630284,0.39552238805970147,0.0
+mcp_agent,59,59,0.14285714285714285,0.12989642183602731,0.03508771929824561,2.25

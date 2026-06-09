@@ -1,0 +1,17 @@
+slice,system,total_cases,judged_cases,incorrect_cases,error_rate
+single_hop,all,60,60,46,0.7666666666666667
+single_hop,mcp_agent,20,20,20,1.0
+single_hop,no_context,20,20,19,0.95
+single_hop,rag_text,20,20,7,0.35
+multi_hop,all,33,33,33,1.0
+multi_hop,mcp_agent,11,11,11,1.0
+multi_hop,no_context,11,11,11,1.0
+multi_hop,rag_text,11,11,11,1.0
+trap_questions,all,24,24,2,0.08333333333333333
+trap_questions,mcp_agent,8,8,0,0.0
+trap_questions,no_context,8,8,2,0.25
+trap_questions,rag_text,8,8,0,0.0
+abstain_cases,all,143,143,122,0.8531468531468531
+abstain_cases,mcp_agent,68,68,60,0.8823529411764706
+abstain_cases,no_context,29,29,24,0.8275862068965517
+abstain_cases,rag_text,46,46,38,0.8260869565217391

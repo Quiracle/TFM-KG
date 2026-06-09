@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # Providers
     embeddings_provider: str = "ollama"
     llm_provider: str = "ollama"
+    judge_provider: str = "anthropic"
+    judge_model: str = "claude-haiku-4-5-20251001"
 
     # Ollama
     ollama_base_url: str = "http://ollama:11434"
@@ -28,6 +30,10 @@ class Settings(BaseSettings):
     # Anthropic
     anthropic_api_key: str | None = None
     anthropic_llm_model: str = "claude-sonnet-4-5"
+
+    # Gemini
+    gemini_api_key: str | None = None
+    gemini_llm_model: str = "gemini-2.5-flash"
 
     # Embedding schema contract
     embedding_dimension: int = 768

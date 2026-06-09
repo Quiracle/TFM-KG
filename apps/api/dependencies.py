@@ -2,7 +2,7 @@ from functools import lru_cache
 
 from src.tfmkg.adapters.embeddings import OllamaEmbeddingsClient, OpenAIEmbeddingsClient
 from src.tfmkg.adapters.db import PsycopgDBClient
-from src.tfmkg.adapters.llm import AnthropicMessagesClient, OllamaChatClient, OpenAIResponsesClient
+from src.tfmkg.adapters.llm import AnthropicMessagesClient, GeminiGenerateAdapter, OllamaChatClient, OpenAIResponsesClient
 from src.tfmkg.adapters.telemetry import PostgresTelemetryClient
 from src.tfmkg.adapters.triplestore import FusekiClient
 from src.tfmkg.adapters.vectorstore.pgvector import PgVectorRepository
@@ -67,6 +67,14 @@ def get_llm_client() -> LLMClientPort:
         return AnthropicMessagesClient(
             api_key=settings.anthropic_api_key,
             model=settings.anthropic_llm_model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if settings.llm_provider == "gemini":
+        if not settings.gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+        return GeminiGenerateAdapter(
+            api_key=settings.gemini_api_key,
+            model=settings.gemini_llm_model,
             timeout_s=settings.ollama_timeout_s,
         )
     return OllamaChatClient(

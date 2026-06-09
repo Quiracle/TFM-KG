@@ -19,10 +19,60 @@ from common import (
     select_dataset_rows,
 )
 from src.tfmkg.core.config import settings
+from src.tfmkg.adapters.llm import AnthropicMessagesClient, GeminiGenerateAdapter, OllamaChatClient, OpenAIResponsesClient
+from src.tfmkg.domain.ports.llm import LLMClientPort, LLMMessage
+
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "openai":
+        return settings.openai_llm_model
+    if provider == "anthropic":
+        return settings.anthropic_llm_model
+    if provider == "gemini":
+        return settings.gemini_llm_model
+    if provider == "ollama":
+        return settings.ollama_llm_model
+    raise SystemExit(f"Unsupported LLM_PROVIDER={provider!r}. Use openai, anthropic, gemini, or ollama.")
+
+
+def _build_llm_client(provider: str, model: str) -> LLMClientPort:
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+        return OpenAIResponsesClient(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required when LLM_PROVIDER=anthropic")
+        return AnthropicMessagesClient(
+            api_key=settings.anthropic_api_key,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY is required when LLM_PROVIDER=gemini")
+        return GeminiGenerateAdapter(
+            api_key=settings.gemini_api_key,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+        )
+    if provider == "ollama":
+        return OllamaChatClient(
+            base_url=settings.ollama_base_url,
+            model=model,
+            timeout_s=settings.ollama_timeout_s,
+            stream=settings.ollama_stream,
+        )
+    raise SystemExit(f"Unsupported LLM_PROVIDER={provider!r}. Use openai, anthropic, gemini, or ollama.")
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the no-context baseline with Claude.")
+    parser = argparse.ArgumentParser(description="Run the no-context baseline.")
     parser.add_argument(
         "--dataset",
         default="eval/datasets/core_eval_v1.jsonl",
@@ -39,9 +89,14 @@ def _parse_args() -> argparse.Namespace:
         help="Prompt file for no-context answering.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        help="LLM provider override. Defaults to LLM_PROVIDER from .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=settings.anthropic_llm_model,
-        help="Anthropic model for no-context generation.",
+        default=None,
+        help="LLM model override. Defaults to the configured model for the selected provider.",
     )
     parser.add_argument(
         "--temperature",
@@ -80,22 +135,12 @@ def main() -> None:
     prompt_text = load_text_file(prompt_path)
     init_jsonl_output(output_path)
 
-    model = args.model
-    client: Any = None
-    llm_message_cls: Any = None
+    provider = str(args.provider or settings.llm_provider).strip().lower()
+    model = str(args.model or _default_model_for_provider(provider)).strip()
+    client: LLMClientPort | None = None
     client_error: Exception | None = None
     try:
-        from src.tfmkg.adapters.llm.anthropic_messages import AnthropicMessagesClient
-        from src.tfmkg.domain.ports.llm import LLMMessage
-
-        llm_message_cls = LLMMessage
-        if not settings.anthropic_api_key:
-            raise RuntimeError("ANTHROPIC_API_KEY is required for run_no_context.")
-        client = AnthropicMessagesClient(
-            api_key=settings.anthropic_api_key,
-            model=model,
-            timeout_s=settings.ollama_timeout_s,
-        )
+        client = _build_llm_client(provider, model)
     except Exception as exc:  # noqa: BLE001
         client_error = exc
 
@@ -104,6 +149,8 @@ def main() -> None:
         f"Loaded {len(rows)} rows from {dataset_path}."
     )
     print(f"[run_no_context] Prompt: {prompt_path}")
+    print(f"[run_no_context] Provider: {provider}")
+    print(f"[run_no_context] Model: {model}")
     print(f"[run_no_context] Output: {output_path}")
 
     failed = 0
@@ -149,8 +196,8 @@ def main() -> None:
         try:
             llm_result = client.generate(
                 messages=[
-                    llm_message_cls(role="system", content=prompt_text),
-                    llm_message_cls(role="user", content=question),
+                    LLMMessage(role="system", content=prompt_text),
+                    LLMMessage(role="user", content=question),
                 ],
                 temperature=args.temperature,
                 max_output_tokens=args.max_output_tokens,
@@ -170,6 +217,7 @@ def main() -> None:
                 tool_trace=[],
                 meta={
                     "prompt_version": prompt_path.name,
+                    "llm_provider": provider,
                     "prompt_tokens": llm_result.prompt_tokens,
                     "completion_tokens": llm_result.completion_tokens,
                 },

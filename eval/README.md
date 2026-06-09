@@ -30,6 +30,13 @@ python eval/scoring/ragas_metrics.py --raw eval/outputs/raw --dataset eval/datas
 python eval/reports/summarize_results.py --scored eval/outputs/scored
 ```
 
+Set `JUDGE_PROVIDER` and `JUDGE_MODEL` in `.env` to choose the binary judge backend. For example:
+
+```bash
+JUDGE_PROVIDER=gemini
+JUDGE_MODEL=gemini-2.5-flash
+```
+
 `judge_binary.py` now writes:
 
 - `eval/outputs/scored/binary_judge_scored.jsonl`

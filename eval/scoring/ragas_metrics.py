@@ -23,7 +23,6 @@ from eval.runners.common import (
 )
 from src.tfmkg.core.config import settings
 
-DEFAULT_RAGAS_MODEL = "claude-haiku-4-5-20251001"
 RETRIEVAL_SYSTEMS = {"rag_text", "mcp_agent"}
 
 CSV_FIELDS = (
@@ -118,17 +117,14 @@ def _load_judge_index(judge_path: Path) -> dict[tuple[str, str], dict[str, Any]]
 def _evaluate_with_ragas(
     *,
     ragas_inputs: list[dict[str, Any]],
+    provider: str,
     model: str,
     temperature: float,
     max_output_tokens: int,
     batch_size: int | None,
     show_progress: bool,
 ) -> list[dict[str, Any]]:
-    if not settings.anthropic_api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is required to run RAGAS metrics.")
-
     try:
-        from anthropic import Anthropic
         from datasets import Dataset
         from ragas import evaluate
         from ragas.llms import llm_factory
@@ -138,17 +134,11 @@ def _evaluate_with_ragas(
             "RAGAS dependencies are missing. Add/install ragas and datasets to run Milestone 7 scoring."
         ) from exc
 
-    anthropic_client = Anthropic(
-        api_key=settings.anthropic_api_key,
-        timeout=settings.ollama_timeout_s,
-        max_retries=0,
-    )
-    ragas_llm = llm_factory(
+    ragas_llm = _build_ragas_llm(
+        provider=provider,
         model=model,
-        provider="anthropic",
-        client=anthropic_client,
         temperature=temperature,
-        max_tokens=max_output_tokens,
+        max_output_tokens=max_output_tokens,
     )
     # RAGAS defaults include both `temperature` and `top_p`. Some Anthropic
     # models reject requests when both are provided, so strip the conflicting
@@ -185,6 +175,65 @@ def _evaluate_with_ragas(
     dataframe = result.to_pandas()
     records = dataframe.to_dict(orient="records")
     return [to_jsonable(record) for record in records]
+
+
+def _build_ragas_llm(*, provider: str, model: str, temperature: float, max_output_tokens: int) -> Any:
+    from ragas.llms import llm_factory
+
+    if provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is required when JUDGE_PROVIDER=anthropic.")
+        from anthropic import Anthropic
+
+        client = Anthropic(
+            api_key=settings.anthropic_api_key,
+            timeout=settings.ollama_timeout_s,
+            max_retries=0,
+        )
+        return llm_factory(
+            model=model,
+            provider="anthropic",
+            client=client,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
+
+    if provider == "gemini":
+        if not settings.gemini_api_key:
+            raise RuntimeError("GEMINI_API_KEY is required when JUDGE_PROVIDER=gemini.")
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(
+            api_key=settings.gemini_api_key,
+            http_options=types.HttpOptions(
+                timeout=settings.ollama_timeout_s * 1000,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
+        return llm_factory(
+            model=model,
+            provider="google",
+            client=client,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
+
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is required when JUDGE_PROVIDER=openai.")
+        from openai import OpenAI
+
+        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        return llm_factory(
+            model=model,
+            provider="openai",
+            client=client,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+        )
+
+    raise RuntimeError(f"Unsupported JUDGE_PROVIDER={provider!r} for RAGAS metrics.")
 
 
 def _build_base_row(
@@ -306,9 +355,14 @@ def _parse_args() -> argparse.Namespace:
         help="Path to write scored output CSV.",
     )
     parser.add_argument(
+        "--provider",
+        default=None,
+        help="RAGAS judge provider override. Defaults to JUDGE_PROVIDER from .env.",
+    )
+    parser.add_argument(
         "--model",
-        default=DEFAULT_RAGAS_MODEL,
-        help="Model used by RAGAS LLM-based metrics.",
+        default=None,
+        help="Model used by RAGAS LLM-based metrics. Defaults to JUDGE_MODEL from .env.",
     )
     parser.add_argument(
         "--temperature",
@@ -351,6 +405,11 @@ def main() -> None:
     if args.batch_size < 0:
         raise SystemExit("--batch-size must be >= 0")
 
+    ragas_provider = str(args.provider or settings.judge_provider).strip().lower()
+    ragas_model = str(args.model or settings.judge_model).strip()
+    if not ragas_model:
+        raise SystemExit("JUDGE_MODEL is required.")
+
     raw_files = _discover_raw_files(raw_path)
     dataset_rows = load_jsonl(dataset_path)
     dataset_index = _build_dataset_index(dataset_rows)
@@ -367,6 +426,8 @@ def main() -> None:
         print(f"[ragas_metrics] Judge rows loaded from: {judge_path}")
     else:
         print(f"[ragas_metrics] Judge file missing or empty: {judge_path}")
+    print(f"[ragas_metrics] RAGAS provider: {ragas_provider}")
+    print(f"[ragas_metrics] RAGAS model: {ragas_model}")
     print(f"[ragas_metrics] Output JSONL: {output_jsonl_path}")
     print(f"[ragas_metrics] Output CSV: {output_csv_path}")
 
@@ -410,7 +471,8 @@ def main() -> None:
         try:
             ragas_scores = _evaluate_with_ragas(
                 ragas_inputs=ragas_inputs,
-                model=args.model,
+                provider=ragas_provider,
+                model=ragas_model,
                 temperature=args.temperature,
                 max_output_tokens=args.max_output_tokens,
                 batch_size=None if args.batch_size == 0 else args.batch_size,
